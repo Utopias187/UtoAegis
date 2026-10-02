@@ -1,31 +1,30 @@
 # UtoAegis
 
-UtoAegis is an incrementally developed Windows endpoint-security product. The
-current milestone is a safe, reusable SHA-256 file hash scanner. It identifies
-file content; it does **not** yet decide whether a hash is malicious.
+UtoAegis is an incrementally developed Windows endpoint-security product. It
+currently provides safe SHA-256 file hashing and a versioned local reputation
+database for exact malicious-hash matches. It does not execute scanned files.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
-## Milestone 1: file hash scanner
+## Current architecture
 
-The first milestone has two runtime components:
-
-- `UtoAegis.Core` contains the UI-independent scanning contract and SHA-256
-  implementation.
-- `UtoAegis.Cli` is a thin command-line adapter that handles arguments,
-  cancellation, structured logs, output, and process exit codes.
-
-Data flows in one direction:
+- `UtoAegis.Core` contains file-scanning and reputation contracts, result
+  models, validation, and orchestration. It has no SQLite dependency.
+- `UtoAegis.Infrastructure` contains the SQLite reputation store and strict
+  JSON Lines indicator reader.
+- `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
+  process exit codes.
 
 ```text
-file path -> CLI -> IFileHashScanner -> read-only stream -> SHA-256 result -> CLI
+file path -> SHA-256 scanner -> digest -> reputation store -> explicit result
+                                            |-> Malicious
+                                            |-> Unknown
+                                            |-> LookupFailed
 ```
 
-The scanner reads files sequentially and asynchronously, never loads the whole
-file into memory, never executes it, and never modifies it. A best-effort
-metadata check rejects a result if the file's size or last-write time changes
-during the scan.
+`Unknown` means only that the digest is absent from the configured database. It
+must never be interpreted as proof that a file is safe.
 
 ## Build and test
 
@@ -33,48 +32,109 @@ Prerequisite: the .NET 8 SDK or a newer SDK capable of targeting .NET 8.
 
 ```powershell
 dotnet restore UtoAegis.slnx
-dotnet build UtoAegis.slnx --no-restore
-dotnet test tests/UtoAegis.Core.Tests/UtoAegis.Core.Tests.csproj --no-build
+dotnet build UtoAegis.slnx --no-restore --configuration Release
+dotnet test UtoAegis.slnx --no-build --configuration Release
 ```
 
-Scan a harmless file:
+## File scanning
+
+Hash a file without performing a reputation lookup:
 
 ```powershell
-dotnet run --project src/UtoAegis.Cli -- README.md
-dotnet run --project src/UtoAegis.Cli -- --json --quiet README.md
+dotnet run --project src/UtoAegis.Cli -- scan README.md
 ```
 
-The CLI writes its result to standard output and JSON Lines operational logs to
-standard error. Exit code `0` means hashing succeeded, `2` means invalid CLI
-usage, `3` means the file could not be scanned, and `130` means cancellation.
+Import the harmless demonstration feed and scan its matching test file:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- import-hashes `
+  --database data/reputation.db samples/indicators.example.jsonl
+
+dotnet run --project src/UtoAegis.Cli -- scan `
+  --database data/reputation.db samples/harmless-test-file.txt
+```
+
+The example deliberately classifies a harmless text fixture as malicious. This
+tests the match path without requiring real malware. Never merge the sample feed
+into a production indicator database.
+
+Add `--json` for machine-readable output or `--quiet` to suppress operational
+JSON Lines logs on standard error.
+
+## Indicator format
+
+Imports use one JSON object per line:
+
+```json
+{"sha256":"64 lowercase or uppercase hexadecimal characters","classification":"Malware","source":"feed-name","malwareFamily":"Optional.Family","firstSeenUtc":"2026-10-02T00:00:00Z"}
+```
+
+Required fields:
+
+- `sha256`: exactly 64 hexadecimal characters; stored lowercase.
+- `source`: 1–200 printable characters.
+
+Optional fields:
+
+- `classification`: currently only `Malware`; omitted values default to it.
+- `malwareFamily`: up to 200 printable characters.
+- `firstSeenUtc`: an ISO 8601 timestamp.
+
+The reader rejects unknown or duplicate JSON properties, malformed hashes,
+control characters, conflicting duplicate indicators, lines over 16 KiB, files
+over 128 MiB, and imports over 250,000 unique indicators. The full input is
+validated before the database transaction starts.
+
+## Exit codes
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Operation succeeded; a reputation lookup may be `Unknown`. |
+| `2` | Invalid command-line usage. |
+| `3` | The file could not be hashed. |
+| `4` | Hashing succeeded but reputation lookup failed. |
+| `5` | Indicator import or database initialization failed. |
+| `10` | A malicious-hash match was detected. |
+| `130` | Operation was cancelled. |
 
 ## Security review
 
-- File paths and files are untrusted input. Paths are normalized and known file
-  access failures become explicit statuses instead of crashes.
-- The file is opened read-only with sequential-scan semantics and is never
-  interpreted or executed.
-- Sharing is restricted to readers while the scanner's handle is open. The
-  scanner also compares size and last-write metadata before and after hashing.
-- Metadata comparison cannot eliminate every time-of-check/time-of-use race. A
-  future quarantine or enforcement decision must revalidate file identity at
-  the point of action and must not rely on a path alone.
-- Logs contain paths, statuses, timing, and timestamps, but not file content or
-  hashes. Paths can still be sensitive and require appropriate log access and
-  retention controls.
-- This milestone makes no malware verdict, which avoids presenting an unknown
-  hash as safe. Reputation lookup belongs in milestone 2.
+- Scanned files are opened read-only, streamed, and never interpreted or
+  executed. Size and last-write metadata are checked for changes during hashing.
+- Imports use parameterized SQL and one transaction. A failed record rolls back
+  the complete batch rather than leaving partial threat data.
+- The SQLite schema is versioned with `PRAGMA user_version`, uses strict typing,
+  and indexes SHA-256 as its primary key.
+- The database is integrity-sensitive. This milestone does not sign indicator
+  feeds or the database, so only trusted operators should be able to replace or
+  modify them.
+- A later enforcement or quarantine action must revalidate file identity at the
+  point of action; path and metadata checks cannot eliminate every race.
+- Paths in logs can disclose usernames or directory structures. Production log
+  storage needs access controls and a retention policy.
+- A repeated hash import updates its stored source metadata. Source trust and
+  multi-source consensus are intentionally deferred until threat-intelligence
+  integration.
 
-## Definition of done for milestone 1
+## Milestone status
 
-- [x] SHA-256 is calculated correctly for known and empty files.
-- [x] Large files are streamed rather than buffered entirely in memory.
-- [x] Missing paths, directories, access failures, and I/O failures are handled.
-- [x] Cancellation is supported.
-- [x] Machine-readable output and structured operational logs are available.
-- [x] Automated tests cover primary success and failure behavior.
-- [x] Build and tests pass on the target development machine.
+### Milestone 1 — File hash scanner
 
-Once the last checkbox is verified, the next milestone is a versioned local
-malware-hash database behind its own lookup interface. SQLite is the likely
-starting store; the scanner should depend on the interface, not SQLite itself.
+- [x] Correct SHA-256 hashing for known and empty files.
+- [x] Streaming file access, cancellation, explicit failures, and structured logs.
+- [x] Automated correctness and failure-path tests.
+
+### Milestone 2 — Malware hash database
+
+- [x] Versioned SQLite schema behind `IHashReputationStore`.
+- [x] Transactional, parameterized, idempotent indicator imports.
+- [x] Strict validation for hashes and untrusted JSON Lines input.
+- [x] Explicit `Malicious`, `Unknown`, and `LookupFailed` outcomes.
+- [x] Source, classification, family, first-seen, and update metadata.
+- [x] Corruption, rollback, schema-version, and duplicate-input tests.
+- [x] CLI import and reputation-aware scanning workflows.
+- [x] Performance smoke test with 10,001 synthetic indicators.
+
+The next milestone is signature-based scanning behind a new independent scanner
+interface. It should begin with a narrow, testable rule format before evaluating
+full YARA integration.

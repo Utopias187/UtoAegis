@@ -67,3 +67,72 @@ Production log storage will need access controls and a retention policy.
 Add a versioned local malware-hash database behind an
 `IHashReputationStore` interface. Imports must validate SHA-256 values and use a
 transaction; lookups must distinguish malicious, unknown, and lookup failure.
+
+## 2026-10-02 — Milestone 2: malware hash database
+
+### Goal
+
+Turn the SHA-256 digest into a useful detection signal by comparing it with a
+local, versioned database of malicious indicators. Preserve the distinction
+between an absent indicator and a trustworthy clean verdict.
+
+### Decisions
+
+- Keep `IHashReputationStore`, indicator validation, and result types in the
+  dependency-free core project. SQLite remains an infrastructure detail.
+- Use Microsoft.Data.Sqlite with a strict version-one schema. SHA-256 is the
+  primary key, making exact lookup indexed without another index.
+- Represent lookup outcomes as `Malicious`, `Unknown`, or `LookupFailed`.
+  Operational failure is never collapsed into an unknown result.
+- Validate a complete JSON Lines feed before opening the write transaction.
+  Conflicting duplicate hashes reject the file; identical duplicates are
+  counted and ignored.
+- Use parameterized upserts inside one transaction. A repeated identical import
+  is idempotent and does not rewrite its update timestamp.
+- Limit import size, line length, nesting depth, indicator count, text length,
+  and accepted JSON properties to bound resource usage and reduce ambiguity.
+- Return exit code `10` for a detection so automation can distinguish a threat
+  signal from scanner or database failure.
+
+### Verification
+
+- Release builds complete with zero warnings.
+- Twenty-three automated tests pass across the core and infrastructure suites.
+- Tests cover normalization, validation, missing and matched hashes, idempotent
+  imports, unsupported schema versions, malformed JSON, conflicting duplicates,
+  duplicate JSON properties, database corruption, and transaction rollback.
+- End-to-end CLI verification imported the harmless sample, returned
+  `Malicious` with exit code `10` for the matching file, and returned `Unknown`
+  with exit code `0` for an absent digest.
+- A 10,001-indicator synthetic feed imported in approximately 2.35 seconds on
+  the development machine after preparing the upsert command once. This is a
+  smoke benchmark rather than a performance guarantee.
+
+### Security notes
+
+The database materially influences detection results and is therefore trusted
+security data. SQLite integrity checks and schema constraints protect against
+accidental invalid data, not a local attacker who can replace the database.
+Signed feeds, authenticated updates, and locked-down file permissions are
+required before remote threat-intelligence updates are accepted.
+
+The current schema stores one source record per digest. A later import can
+replace that metadata. Multi-source observations, trust ranking, revocation,
+and feed provenance should be added with threat-intelligence integration rather
+than improvised inside the scanner.
+
+### Known limitations
+
+- Only exact SHA-256 matches are supported; there are no byte-pattern rules.
+- Indicators and databases are not cryptographically signed.
+- The store does not yet model indicator expiry, revocation, or several sources
+  reporting the same digest.
+- The project still targets .NET 8 to match the installed toolchain and must
+  move to a supported long-term release before production distribution.
+
+### Next milestone
+
+Add signature-based scanning behind its own interface. Start with a constrained
+rule model and harmless byte-pattern fixtures, measure streaming performance,
+and evaluate YARA only after the integration boundary and safety behavior are
+proven.
