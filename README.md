@@ -28,13 +28,19 @@ must never be interpreted as proof that a file is safe.
 
 ## Build and test
 
-Prerequisite: the .NET 8 SDK or a newer SDK capable of targeting .NET 8.
+Prerequisite: a .NET 10 SDK compatible with the policy in `global.json`.
 
 ```powershell
-dotnet restore UtoAegis.slnx
+dotnet restore UtoAegis.slnx --locked-mode
 dotnet build UtoAegis.slnx --no-restore --configuration Release
 dotnet test UtoAegis.slnx --no-build --configuration Release
 ```
+
+Package versions are managed centrally in `Directory.Packages.props`, and each
+project commits a NuGet lock file. Restore audits direct and transitive packages;
+known vulnerability advisories fail the build. GitHub Actions repeats the locked
+restore, release build, tests, and vulnerability report for every push to `main`
+and every pull request.
 
 ## File scanning
 
@@ -134,6 +140,14 @@ validated before the database transaction starts.
 - [x] Corruption, rollback, schema-version, and duplicate-input tests.
 - [x] CLI import and reputation-aware scanning workflows.
 - [x] Performance smoke test with 10,001 synthetic indicators.
+
+### Platform readiness for Milestone 3
+
+- [x] Upgraded all projects to .NET 10 LTS.
+- [x] Centralized package versions and committed dependency lock files.
+- [x] Enabled auditing for direct and transitive NuGet dependencies.
+- [x] Added GitHub Actions build and test validation.
+- [x] Added weekly Dependabot checks for NuGet and GitHub Actions.
 
 The next milestone is signature-based scanning behind a new independent scanner
 interface. It should begin with a narrow, testable rule format before evaluating

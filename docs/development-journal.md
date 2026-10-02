@@ -136,3 +136,40 @@ Add signature-based scanning behind its own interface. Start with a constrained
 rule model and harmless byte-pattern fixtures, measure streaming performance,
 and evaluate YARA only after the integration boundary and safety behavior are
 proven.
+
+## 2026-10-02 — Platform hardening before Milestone 3
+
+### Goal
+
+Move off the near-end-of-support .NET 8 baseline and make dependency and build
+verification reproducible before signature-scanning work begins.
+
+### Decisions
+
+- Target .NET 10 across the solution from `Directory.Build.props` rather than
+  repeating the target framework in every project.
+- Add `global.json` with a .NET 10 minimum and latest-feature roll-forward so
+  supported .NET 10 feature bands can build the repository.
+- Upgrade Microsoft.Data.Sqlite to 10.0.12 while retaining MSTest 4.4.1, which
+  already supports .NET 10.
+- Manage direct package versions in `Directory.Packages.props` and commit a lock
+  file for every project.
+- Audit direct and transitive dependencies during restore, treating NuGet
+  vulnerability advisories NU1901 through NU1904 as build errors.
+- Run locked restore, release build, tests, and a vulnerability report in GitHub
+  Actions. Pin third-party workflow actions to full commit hashes.
+- Schedule weekly Dependabot checks for both NuGet packages and workflow actions.
+
+### Verification
+
+- The repository selected .NET SDK 10.0.401 through `global.json`.
+- Locked restore completed for all five projects.
+- Release build completed with zero warnings and zero errors.
+- All 23 automated tests passed on `net10.0`.
+- NuGet reported no known vulnerable direct or transitive packages.
+
+### Milestone 3 readiness
+
+The platform upgrade does not change scanner behavior or database schema.
+Milestone 3 can add signature scanning behind a new independent interface while
+the existing hash and reputation contracts remain stable.
