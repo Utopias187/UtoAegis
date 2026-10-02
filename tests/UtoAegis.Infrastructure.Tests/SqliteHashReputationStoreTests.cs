@@ -119,6 +119,50 @@ public sealed class SqliteHashReputationStoreTests
             async () => await store.LookupAsync("invalid"));
     }
 
+    [TestMethod]
+    public async Task LookupAsync_CorruptedDatabase_ReturnsLookupFailed()
+    {
+        Directory.CreateDirectory(_testDirectory);
+        await File.WriteAllBytesAsync(_databasePath, [0x55, 0x74, 0x6f, 0x41, 0x65, 0x67, 0x69, 0x73]);
+        var store = new SqliteHashReputationStore(_databasePath);
+
+        var result = await store.LookupAsync(new string('a', 64));
+
+        Assert.AreEqual(HashReputationStatus.LookupFailed, result.Status);
+        Assert.IsNull(result.Indicator);
+    }
+
+    [TestMethod]
+    public async Task ImportAsync_SecondInsertFails_RollsBackFirstInsert()
+    {
+        var store = new SqliteHashReputationStore(_databasePath);
+        await store.InitializeAsync();
+        var first = CreateIndicator('1');
+        var rejected = CreateIndicator('2');
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                $"""
+                CREATE TRIGGER reject_test_hash
+                BEFORE INSERT ON malicious_hashes
+                WHEN NEW.sha256 = '{rejected.Sha256}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic transaction failure');
+                END;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await Assert.ThrowsExactlyAsync<ReputationStoreException>(
+            async () => await store.ImportAsync([first, rejected]));
+        var firstLookup = await store.LookupAsync(first.Sha256);
+
+        Assert.AreEqual(HashReputationStatus.Unknown, firstLookup.Status);
+    }
+
     private static MalwareHashIndicator CreateIndicator(char hashCharacter)
     {
         var created = MalwareHashIndicator.TryCreate(
