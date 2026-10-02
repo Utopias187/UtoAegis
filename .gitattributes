@@ -1,0 +1,2 @@
+/samples/harmless-test-file.txt -text
+*.jsonl text eol=lf

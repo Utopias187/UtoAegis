@@ -1,5 +1,7 @@
 <Solution>
   <Project Path="src/UtoAegis.Core/UtoAegis.Core.csproj" />
+  <Project Path="src/UtoAegis.Infrastructure/UtoAegis.Infrastructure.csproj" />
   <Project Path="src/UtoAegis.Cli/UtoAegis.Cli.csproj" />
   <Project Path="tests/UtoAegis.Core.Tests/UtoAegis.Core.Tests.csproj" />
+  <Project Path="tests/UtoAegis.Infrastructure.Tests/UtoAegis.Infrastructure.Tests.csproj" />
 </Solution>
