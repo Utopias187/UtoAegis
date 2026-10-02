@@ -206,6 +206,7 @@ public sealed class SqliteHashReputationStore : IHashReputationStore
             var sourceParameter = command.Parameters.Add("$source", SqliteType.Text);
             var firstSeenParameter = command.Parameters.Add("$first_seen_utc", SqliteType.Text);
             var updatedParameter = command.Parameters.Add("$record_updated_utc", SqliteType.Text);
+            await command.PrepareAsync(cancellationToken).ConfigureAwait(false);
 
             var changedCount = 0;
             foreach (var indicator in indicators)
