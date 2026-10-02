@@ -1,17 +1,45 @@
 namespace UtoAegis.Cli;
 
-internal sealed record CliOptions(string? FilePath, bool Json, bool Quiet, bool ShowHelp)
+internal enum CliCommand
+{
+    Scan,
+    ImportHashes
+}
+
+internal sealed record CliOptions(
+    CliCommand Command,
+    string? InputPath,
+    string? DatabasePath,
+    bool Json,
+    bool Quiet,
+    bool ShowHelp)
 {
     public static bool TryParse(string[] args, out CliOptions? options, out string? error)
     {
+        var command = CliCommand.Scan;
+        var index = 0;
+
+        if (args.Length > 0 && args[0] == "scan")
+        {
+            index++;
+        }
+        else if (args.Length > 0 && args[0] == "import-hashes")
+        {
+            command = CliCommand.ImportHashes;
+            index++;
+        }
+
         var json = false;
         var quiet = false;
         var showHelp = false;
         var parseOptions = true;
-        string? filePath = null;
+        string? databasePath = null;
+        string? inputPath = null;
 
-        foreach (var argument in args)
+        while (index < args.Length)
         {
+            var argument = args[index++];
+
             if (parseOptions && argument == "--")
             {
                 parseOptions = false;
@@ -36,32 +64,58 @@ internal sealed record CliOptions(string? FilePath, bool Json, bool Quiet, bool 
                 continue;
             }
 
+            if (parseOptions && argument == "--database")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--database requires a path.", out options, out error);
+                }
+
+                if (databasePath is not null)
+                {
+                    return Fail("--database may only be supplied once.", out options, out error);
+                }
+
+                databasePath = args[index++];
+                continue;
+            }
+
             if (parseOptions && argument.StartsWith('-'))
             {
-                options = null;
-                error = $"Unknown option: {argument}";
-                return false;
+                return Fail($"Unknown option: {argument}", out options, out error);
             }
 
-            if (filePath is not null)
+            if (inputPath is not null)
             {
-                options = null;
-                error = "Exactly one file path is required.";
-                return false;
+                return Fail("Exactly one input path is required.", out options, out error);
             }
 
-            filePath = argument;
+            inputPath = argument;
         }
 
-        if (!showHelp && filePath is null)
+        if (!showHelp && inputPath is null)
         {
-            options = null;
-            error = "A file path is required.";
-            return false;
+            var inputName = command == CliCommand.Scan ? "file" : "JSON Lines import file";
+            return Fail($"A {inputName} path is required.", out options, out error);
         }
 
-        options = new CliOptions(filePath, json, quiet, showHelp);
+        if (!showHelp && command == CliCommand.ImportHashes && databasePath is null)
+        {
+            return Fail("import-hashes requires --database <path>.", out options, out error);
+        }
+
+        options = new CliOptions(command, inputPath, databasePath, json, quiet, showHelp);
         error = null;
         return true;
+    }
+
+    private static bool Fail(
+        string message,
+        out CliOptions? options,
+        out string? error)
+    {
+        options = null;
+        error = message;
+        return false;
     }
 }
