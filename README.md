@@ -1,26 +1,25 @@
 # UtoAegis
 
 UtoAegis is an incrementally developed Windows endpoint-security product. It
-currently provides safe SHA-256 file hashing and a versioned local reputation
-database for exact malicious-hash matches. It does not execute scanned files.
+currently combines safe SHA-256 hashing, a versioned local reputation database,
+and streaming exact-byte signature detection. It does not execute scanned files.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
 ## Current architecture
 
-- `UtoAegis.Core` contains file-scanning and reputation contracts, result
-  models, validation, and orchestration. It has no SQLite dependency.
+- `UtoAegis.Core` contains hash, reputation, and signature contracts, result
+  models, validation, and scanning engines. It has no SQLite dependency.
 - `UtoAegis.Infrastructure` contains the SQLite reputation store and strict
-  JSON Lines indicator reader.
+  JSON Lines readers for indicators and signature rules.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 
 ```text
-file path -> SHA-256 scanner -> digest -> reputation store -> explicit result
-                                            |-> Malicious
-                                            |-> Unknown
-                                            |-> LookupFailed
+                         |-> SHA-256 -> reputation store -> Malicious / Unknown / failure
+file path -> CLI engine -|
+                         |-> fixed-byte scanner -> Detected / NoMatch / failure
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -67,6 +66,18 @@ into a production indicator database.
 Add `--json` for machine-readable output or `--quiet` to suppress operational
 JSON Lines logs on standard error.
 
+Run the harmless signature example by itself or alongside reputation scanning:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- scan `
+  --signatures samples/signatures.example.jsonl samples/harmless-test-file.txt
+
+dotnet run --project src/UtoAegis.Cli -- scan `
+  --database data/reputation.db `
+  --signatures samples/signatures.example.jsonl `
+  samples/harmless-test-file.txt
+```
+
 ## Indicator format
 
 Imports use one JSON object per line:
@@ -91,6 +102,29 @@ control characters, conflicting duplicate indicators, lines over 16 KiB, files
 over 128 MiB, and imports over 250,000 unique indicators. The full input is
 validated before the database transaction starts.
 
+## Signature format
+
+Signature rules also use one JSON object per line:
+
+```json
+{"id":"demo.marker","name":"Harmless test marker","source":"local-demo","hexPattern":"55746f4165676973"}
+```
+
+- `id`: 1–128 ASCII letters, digits, dots, underscores, or hyphens; starts with
+  a letter or digit and is unique without regard to case.
+- `name` and `source`: 1–200 printable characters.
+- `hexPattern`: 8–1024 exact bytes encoded as hexadecimal without separators.
+
+The reader rejects malformed UTF-8, comments, trailing commas, unknown or
+duplicate properties, conflicting rule IDs, lines over 8 KiB, files over 16
+MiB, and more than 1,024 unique rules. Identical duplicate rules are counted
+and ignored.
+
+`fixed-byte-v1` is deliberately narrow: matching is case-sensitive and
+contiguous, with no wildcards, regular expressions, or boolean conditions. A
+`NoMatch` result means only that none of the configured rules matched; it is not
+a clean-file verdict.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -100,13 +134,19 @@ validated before the database transaction starts.
 | `3` | The file could not be hashed. |
 | `4` | Hashing succeeded but reputation lookup failed. |
 | `5` | Indicator import or database initialization failed. |
-| `10` | A malicious-hash match was detected. |
+| `6` | Signature rules could not load or signature scanning failed. |
+| `10` | A malicious-hash or signature match was detected. |
 | `130` | Operation was cancelled. |
 
 ## Security review
 
 - Scanned files are opened read-only, streamed, and never interpreted or
-  executed. Size and last-write metadata are checked for changes during hashing.
+  executed. Size and last-write metadata are checked within each scan and
+  across the combined hash/signature workflow.
+- Signature patterns and rule collections have explicit size limits. Rented
+  scan buffers are cleared before returning to the shared pool.
+- A rule match is evidence, not proof of maliciousness. Rule provenance,
+  quality review, and false-positive testing remain operational requirements.
 - Imports use parameterized SQL and one transaction. A failed record rolls back
   the complete batch rather than leaving partial threat data.
 - The SQLite schema is versioned with `PRAGMA user_version`, uses strict typing,
@@ -141,7 +181,7 @@ validated before the database transaction starts.
 - [x] CLI import and reputation-aware scanning workflows.
 - [x] Performance smoke test with 10,001 synthetic indicators.
 
-### Platform readiness for Milestone 3
+### Platform foundation
 
 - [x] Upgraded all projects to .NET 10 LTS.
 - [x] Centralized package versions and committed dependency lock files.
@@ -149,6 +189,15 @@ validated before the database transaction starts.
 - [x] Added GitHub Actions build and test validation.
 - [x] Added weekly Dependabot checks for NuGet and GitHub Actions.
 
-The next milestone is signature-based scanning behind a new independent scanner
-interface. It should begin with a narrow, testable rule format before evaluating
-full YARA integration.
+### Milestone 3 — Signature scanner
+
+- [x] Added a stable `ISignatureScanner` boundary and explicit result statuses.
+- [x] Added a bounded, streaming fixed-byte engine with boundary-safe matching.
+- [x] Added a strict JSON Lines rule loader and harmless example rule.
+- [x] Integrated optional signature scanning into human and JSON CLI output.
+- [x] Added detection, no-match, failure, cancellation, mutation, and parser tests.
+- [x] Added a 16 MiB / 32-rule performance smoke test.
+
+The next milestone is directory and recursive scanning. It should reuse the
+existing engines, bound concurrency, avoid following unsafe links by default,
+and preserve one explicit result per file.

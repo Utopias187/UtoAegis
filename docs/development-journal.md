@@ -173,3 +173,106 @@ verification reproducible before signature-scanning work begins.
 The platform upgrade does not change scanner behavior or database schema.
 Milestone 3 can add signature scanning behind a new independent interface while
 the existing hash and reputation contracts remain stable.
+
+## 2026-10-15 — Milestone 3: signature-based scanner
+
+### Goal
+
+Add a second local detection layer that can identify known byte sequences
+without executing or loading an entire scanned file into memory. Keep the
+engine replaceable so richer rule technology can be evaluated independently.
+
+### Design and data flow
+
+- `ByteSignatureRule` validates and normalizes bounded rule metadata and exact
+  hexadecimal patterns.
+- `ISignatureScanner` separates orchestration from the first implementation.
+- `FixedByteSignatureScanner` reads a file in 1 MiB chunks and retains only the
+  overlap needed to find a pattern crossing a chunk boundary.
+- `JsonLinesSignatureRuleReader` treats rule files as untrusted input and fully
+  validates them before constructing a scanner.
+- The CLI optionally runs hash reputation and signature detection together,
+  reports each signal independently, and returns detection exit code `10` if
+  either engine matches.
+
+```text
+rules.jsonl -> strict reader -> validated rules --|
+                                                  |-> fixed-byte scanner -> matches
+file path ----------------------------------------|
+```
+
+The scanner reports the first offset for every matching rule. It continues to
+the end of the file so read errors and file changes cannot be hidden by an
+early match. `Detected`, `NoMatch`, and operational failures are distinct.
+
+### Security review
+
+- Files are opened read-only with sequential access and are never executed.
+- Rule count, pattern length, line length, nesting depth, and rule-file size are
+  bounded to limit memory and CPU abuse.
+- Shared byte buffers are cleared before being returned to `ArrayPool`.
+- Size and last-write metadata are checked during each read. The CLI also takes
+  a metadata snapshot around the combined workflow so hash and signature
+  results are discarded if a common mutation is observed between stages.
+- Metadata checks remain best effort. A privileged attacker may preserve or
+  restore metadata, so future quarantine must reopen and revalidate the target.
+- Exact byte signatures can produce false positives. Matches retain rule ID,
+  name, source, byte offset, and pattern length so decisions remain auditable.
+- Rule files affect verdicts and are trusted security data. Production updates
+  will require authentication, signing, rollback protection, and source policy.
+
+### YARA-X evaluation
+
+[YARA-X](https://virustotal.github.io/yara-x/docs/) supports text, hexadecimal,
+and regular-expression patterns combined with boolean rule conditions and file
+format modules. Its native API separates rule compilation from scanning and
+supports timeouts and reusable compiled rules. Those capabilities are useful,
+but native distribution, lifecycle management, rule compatibility, resource
+limits, and failure isolation need a dedicated integration milestone.
+
+The current engine therefore remains intentionally small rather than
+implementing a partial YARA language. A future YARA-X adapter can implement
+`ISignatureScanner` while preserving the CLI and result boundary established
+here.
+
+### Verification
+
+- Locked restore and release build completed on .NET 10 with zero warnings and
+  zero errors.
+- All 63 automated tests passed: 34 core, 22 infrastructure, and 7 CLI tests.
+- Tests cover validation, chunk-boundary matches, stable match ordering,
+  duplicate rules, malformed JSON, file and line limits, cancellation, access
+  failures, and cross-stage metadata changes.
+- A 16 MiB file with 32 nonmatching rules completed within the 30-second smoke
+  limit; the complete core test assembly ran in under one second on the
+  development machine. This is a regression signal, not a production SLA.
+- End-to-end CLI checks returned `10` for the harmless demonstration match, `0`
+  for a no-match scan, and `6` for an unavailable rule file. JSON output was
+  also verified.
+
+### Known limitations
+
+- Rules support only exact, contiguous byte patterns. There are no wildcards,
+  regular expressions, conditions, namespaces, or executable-format modules.
+- Matching cost grows with both file size and rule count. A production-scale
+  rule corpus will require a multi-pattern algorithm or a vetted YARA-X adapter.
+- Only the first match per rule is retained to bound result growth.
+- Rule files are local and unsigned, with no update or revocation mechanism.
+- Results are emitted to the console but are not yet stored as detection history.
+
+### Definition of done
+
+- [x] Stable signature scanner interface and explicit outcomes exist.
+- [x] Streaming matching detects patterns inside and across read buffers.
+- [x] Strict rule parsing rejects ambiguous or unbounded input.
+- [x] CLI human, JSON, logging, and exit-code behavior is integrated.
+- [x] Harmless positive and negative paths are verified.
+- [x] Error handling, cancellation, mutation checks, and performance are tested.
+- [x] Security decisions, false-positive risk, and limitations are documented.
+
+### Next milestone
+
+Build directory and recursive scanning on top of the existing single-file
+engines. Traversal must bound concurrency, avoid directory links by default,
+continue after per-file failures, and produce a deterministic summary without
+calling any `NoMatch` or `Unknown` file clean.
