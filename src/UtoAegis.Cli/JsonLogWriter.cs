@@ -1,6 +1,7 @@
 using System.Text.Json;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
+using UtoAegis.Core.Signatures;
 
 namespace UtoAegis.Cli;
 
@@ -40,6 +41,31 @@ internal static class JsonLogWriter
 
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
     }
+
+    public static void SignatureRulesLoaded(
+        string rulePath,
+        int ruleCount,
+        int duplicateCount)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "signature_rules_loaded",
+            rulePath = Path.GetFullPath(rulePath),
+            ruleCount,
+            duplicateCount
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void SignatureScanFinished(SignatureScanResult result) => Write(
+        result.IsCompleted ? "information" : "warning",
+        result.IsCompleted ? "signature_scan_completed" : "signature_scan_failed",
+        result.Path,
+        result.Status.ToString(),
+        result.Elapsed.TotalMilliseconds);
 
     private static void Write(
         string level,

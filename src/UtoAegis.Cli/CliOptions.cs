@@ -10,6 +10,7 @@ internal sealed record CliOptions(
     CliCommand Command,
     string? InputPath,
     string? DatabasePath,
+    string? SignaturePath,
     bool Json,
     bool Quiet,
     bool ShowHelp)
@@ -34,6 +35,7 @@ internal sealed record CliOptions(
         var showHelp = false;
         var parseOptions = true;
         string? databasePath = null;
+        string? signaturePath = null;
         string? inputPath = null;
 
         while (index < args.Length)
@@ -43,6 +45,22 @@ internal sealed record CliOptions(
             if (parseOptions && argument == "--")
             {
                 parseOptions = false;
+                continue;
+            }
+
+            if (parseOptions && argument == "--signatures")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--signatures requires a path.", out options, out error);
+                }
+
+                if (signaturePath is not null)
+                {
+                    return Fail("--signatures may only be supplied once.", out options, out error);
+                }
+
+                signaturePath = args[index++];
                 continue;
             }
 
@@ -104,7 +122,19 @@ internal sealed record CliOptions(
             return Fail("import-hashes requires --database <path>.", out options, out error);
         }
 
-        options = new CliOptions(command, inputPath, databasePath, json, quiet, showHelp);
+        if (!showHelp && command == CliCommand.ImportHashes && signaturePath is not null)
+        {
+            return Fail("--signatures is only valid with the scan command.", out options, out error);
+        }
+
+        options = new CliOptions(
+            command,
+            inputPath,
+            databasePath,
+            signaturePath,
+            json,
+            quiet,
+            showHelp);
         error = null;
         return true;
     }

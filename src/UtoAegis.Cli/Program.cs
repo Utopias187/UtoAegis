@@ -2,8 +2,10 @@ using System.Text.Json;
 using UtoAegis.Cli;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
+using UtoAegis.Core.Signatures;
 using UtoAegis.Infrastructure.Importing;
 using UtoAegis.Infrastructure.Reputation;
+using UtoAegis.Infrastructure.Signatures;
 
 if (!CliOptions.TryParse(args, out var options, out var parseError))
 {
@@ -44,6 +46,11 @@ catch (IndicatorImportException exception)
     Console.Error.WriteLine($"Import rejected: {exception.Message}");
     return ExitCodes.ImportFailed;
 }
+catch (SignatureRuleFileException exception)
+{
+    Console.Error.WriteLine($"Signature rules rejected: {exception.Message}");
+    return ExitCodes.SignatureScanFailed;
+}
 catch (ReputationStoreException exception)
 {
     Console.Error.WriteLine($"Reputation database error: {exception.Message}");
@@ -70,6 +77,22 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
     var hashScanner = new Sha256FileHashScanner();
     FileHashScanResult hashResult;
     HashReputationResult? reputation = null;
+    SignatureRuleFile? signatureRuleFile = null;
+    SignatureScanResult? signatureResult = null;
+
+    if (options.SignaturePath is not null)
+    {
+        signatureRuleFile = await JsonLinesSignatureRuleReader.ReadAsync(
+            options.SignaturePath,
+            cancellationToken);
+        if (!options.Quiet)
+        {
+            JsonLogWriter.SignatureRulesLoaded(
+                options.SignaturePath,
+                signatureRuleFile.Rules.Count,
+                signatureRuleFile.DuplicateCount);
+        }
+    }
 
     if (options.DatabasePath is null)
     {
@@ -85,21 +108,43 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
         reputation = result.Reputation;
     }
 
+    if (hashResult.IsSuccess && signatureRuleFile is not null)
+    {
+        var signatureScanner = new FixedByteSignatureScanner(signatureRuleFile.Rules);
+        signatureResult = await signatureScanner.ScanAsync(
+            options.InputPath!,
+            cancellationToken);
+    }
+
     if (!options.Quiet)
     {
         JsonLogWriter.ScanFinished(hashResult, reputation);
+        if (signatureResult is not null)
+        {
+            JsonLogWriter.SignatureScanFinished(signatureResult);
+        }
     }
 
-    WriteScanResult(options.Json, hashResult, reputation);
+    WriteScanResult(options.Json, hashResult, reputation, signatureResult);
 
     if (!hashResult.IsSuccess)
     {
         return ExitCodes.ScanFailed;
     }
 
+    if (signatureResult is { IsCompleted: false })
+    {
+        return ExitCodes.SignatureScanFailed;
+    }
+
+    if (reputation?.Status == HashReputationStatus.Malicious ||
+        signatureResult?.Status == SignatureScanStatus.Detected)
+    {
+        return ExitCodes.ThreatDetected;
+    }
+
     return reputation?.Status switch
     {
-        HashReputationStatus.Malicious => ExitCodes.ThreatDetected,
         HashReputationStatus.LookupFailed => ExitCodes.ReputationLookupFailed,
         _ => ExitCodes.Success
     };
@@ -147,7 +192,8 @@ static async Task<int> RunImportAsync(CliOptions options, CancellationToken canc
 static void WriteScanResult(
     bool json,
     FileHashScanResult hashResult,
-    HashReputationResult? reputation)
+    HashReputationResult? reputation,
+    SignatureScanResult? signatureResult)
 {
     if (json)
     {
@@ -172,6 +218,24 @@ static void WriteScanResult(
                         firstSeenUtc = reputation.Indicator?.FirstSeenUtc,
                         recordUpdatedUtc = reputation.RecordUpdatedUtc,
                         error = reputation.ErrorMessage
+                    },
+                signatures = signatureResult is null
+                    ? null
+                    : new
+                    {
+                        status = signatureResult.Status.ToString(),
+                        engine = signatureResult.EngineName,
+                        fileSizeBytes = signatureResult.FileSizeBytes,
+                        elapsedMilliseconds = signatureResult.Elapsed.TotalMilliseconds,
+                        error = signatureResult.ErrorMessage,
+                        matches = signatureResult.Matches.Select(match => new
+                        {
+                            ruleId = match.RuleId,
+                            ruleName = match.RuleName,
+                            source = match.Source,
+                            offset = match.Offset,
+                            patternLengthBytes = match.PatternLengthBytes
+                        })
                     }
             },
             CliJson.ResultOptions));
@@ -200,24 +264,45 @@ static void WriteScanResult(
     {
         Console.Error.WriteLine($"Reputation lookup failed: {reputation.ErrorMessage}");
     }
+
+    if (signatureResult?.Status == SignatureScanStatus.Detected)
+    {
+        Console.WriteLine($"Signatures: DETECTED ({signatureResult.Matches.Count} rule match(es))");
+        foreach (var match in signatureResult.Matches)
+        {
+            Console.WriteLine(
+                $"  {match.RuleId} at byte {match.Offset} " +
+                $"({match.RuleName}; source: {match.Source})");
+        }
+    }
+    else if (signatureResult?.Status == SignatureScanStatus.NoMatch)
+    {
+        Console.WriteLine("Signatures: NO MATCH (no configured exact-byte rule matched)");
+    }
+    else if (signatureResult is not null)
+    {
+        Console.Error.WriteLine(
+            $"Signature scan failed ({signatureResult.Status}): {signatureResult.ErrorMessage}");
+    }
 }
 
 static void PrintUsage()
 {
     Console.WriteLine(
         """
-        UtoAegis file and hash-reputation scanner
+        UtoAegis file, hash-reputation, and signature scanner
 
         Usage:
-          utoaegis [scan] [--database <path>] [--json] [--quiet] [--] <file>
+          utoaegis [scan] [--database <path>] [--signatures <path>] [--json] [--quiet] [--] <file>
           utoaegis import-hashes --database <path> [--json] [--quiet] <indicators.jsonl>
 
         Commands:
-          scan           Calculate SHA-256 and optionally query a reputation database.
+          scan           Calculate SHA-256 and optionally run reputation and signature checks.
           import-hashes  Validate and transactionally import JSON Lines indicators.
 
         Options:
           --database     SQLite reputation database path.
+          --signatures   JSON Lines exact-byte signature rule file.
           --json         Emit the result as JSON.
           --quiet        Suppress structured operational logs on stderr.
           --             Treat all following arguments as positional values.
@@ -226,5 +311,8 @@ static void PrintUsage()
         JSON Lines indicator fields:
           sha256, source, optional classification (Malware), malwareFamily,
           and firstSeenUtc.
+
+        JSON Lines signature fields:
+          id, name, source, and hexPattern (8 to 1024 bytes; no separators).
         """);
 }

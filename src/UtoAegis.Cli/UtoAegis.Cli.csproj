@@ -3,6 +3,9 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="UtoAegis.Cli.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../UtoAegis.Core/UtoAegis.Core.csproj" />
     <ProjectReference Include="../UtoAegis.Infrastructure/UtoAegis.Infrastructure.csproj" />
   </ItemGroup>
