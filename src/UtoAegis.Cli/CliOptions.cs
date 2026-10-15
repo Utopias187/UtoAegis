@@ -7,6 +7,7 @@ internal enum CliCommand
 {
     Scan,
     ScanDirectory,
+    Monitor,
     ImportHashes,
     HistoryList,
     HistoryShow,
@@ -21,6 +22,8 @@ internal sealed record CliOptions(
     string? HistoryPath,
     bool Recursive,
     int MaximumConcurrency,
+    int DebounceMilliseconds,
+    int MonitorQueueCapacity,
     int HistoryLimit,
     int? OlderThanDays,
     bool Json,
@@ -30,6 +33,10 @@ internal sealed record CliOptions(
     public const int DefaultHistoryLimit = 25;
     public const int MaximumHistoryLimit = 200;
     public const int MaximumRetentionDays = 36_500;
+    public const int DefaultDebounceMilliseconds = 500;
+    public const int MaximumDebounceMilliseconds = 60_000;
+    public const int DefaultMonitorQueueCapacity = 4_096;
+    public const int MaximumMonitorQueueCapacity = 65_536;
 
     public static bool TryParse(string[] args, out CliOptions? options, out string? error)
     {
@@ -48,6 +55,11 @@ internal sealed record CliOptions(
         else if (args.Length > 0 && args[0] == "scan-directory")
         {
             command = CliCommand.ScanDirectory;
+            index++;
+        }
+        else if (args.Length > 0 && args[0] == "monitor")
+        {
+            command = CliCommand.Monitor;
             index++;
         }
         else if (args.Length > 0 && args[0] == "history")
@@ -86,6 +98,10 @@ internal sealed record CliOptions(
         var parseOptions = true;
         var maximumConcurrency = DirectoryScanOptions.DefaultMaximumConcurrency;
         var maximumConcurrencySpecified = false;
+        var debounceMilliseconds = DefaultDebounceMilliseconds;
+        var debounceSpecified = false;
+        var monitorQueueCapacity = DefaultMonitorQueueCapacity;
+        var queueCapacitySpecified = false;
         var historyLimit = DefaultHistoryLimit;
         var historyLimitSpecified = false;
         int? olderThanDays = null;
@@ -191,6 +207,58 @@ internal sealed record CliOptions(
                 continue;
             }
 
+            if (parseOptions && argument == "--debounce-ms")
+            {
+                if (index >= args.Length ||
+                    !int.TryParse(
+                        args[index],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out debounceMilliseconds) ||
+                    debounceMilliseconds is < 0 or > MaximumDebounceMilliseconds)
+                {
+                    return Fail(
+                        $"--debounce-ms requires an integer from 0 to {MaximumDebounceMilliseconds}.",
+                        out options,
+                        out error);
+                }
+
+                if (debounceSpecified)
+                {
+                    return Fail("--debounce-ms may only be supplied once.", out options, out error);
+                }
+
+                index++;
+                debounceSpecified = true;
+                continue;
+            }
+
+            if (parseOptions && argument == "--queue-capacity")
+            {
+                if (index >= args.Length ||
+                    !int.TryParse(
+                        args[index],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out monitorQueueCapacity) ||
+                    monitorQueueCapacity is < 1 or > MaximumMonitorQueueCapacity)
+                {
+                    return Fail(
+                        $"--queue-capacity requires an integer from 1 to {MaximumMonitorQueueCapacity}.",
+                        out options,
+                        out error);
+                }
+
+                if (queueCapacitySpecified)
+                {
+                    return Fail("--queue-capacity may only be supplied once.", out options, out error);
+                }
+
+                index++;
+                queueCapacitySpecified = true;
+                continue;
+            }
+
             if (parseOptions && argument == "--recursive")
             {
                 if (recursiveSpecified)
@@ -281,6 +349,7 @@ internal sealed record CliOptions(
 
         var requiresInput = command is CliCommand.Scan or
             CliCommand.ScanDirectory or
+            CliCommand.Monitor or
             CliCommand.ImportHashes or
             CliCommand.HistoryShow;
         if (!showHelp && requiresInput && inputPath is null)
@@ -289,6 +358,7 @@ internal sealed record CliOptions(
             {
                 CliCommand.Scan => "file",
                 CliCommand.ScanDirectory => "directory",
+                CliCommand.Monitor => "directory",
                 CliCommand.ImportHashes => "JSON Lines import file",
                 _ => "scan ID"
             };
@@ -308,7 +378,7 @@ internal sealed record CliOptions(
         if (!showHelp && command == CliCommand.ImportHashes && signaturePath is not null)
         {
             return Fail(
-                "--signatures is only valid with scan or scan-directory.",
+                "--signatures is only valid with scan, scan-directory, or monitor.",
                 out options,
                 out error);
         }
@@ -335,17 +405,32 @@ internal sealed record CliOptions(
                 out error);
         }
 
-        if (!showHelp && command != CliCommand.ScanDirectory && recursiveSpecified)
-        {
-            return Fail("--recursive is only valid with scan-directory.", out options, out error);
-        }
-
-        if (!showHelp && command != CliCommand.ScanDirectory && maximumConcurrencySpecified)
+        if (!showHelp && command is not (CliCommand.ScanDirectory or CliCommand.Monitor) &&
+            recursiveSpecified)
         {
             return Fail(
-                "--max-concurrency is only valid with scan-directory.",
+                "--recursive is only valid with scan-directory or monitor.",
                 out options,
                 out error);
+        }
+
+        if (!showHelp && command is not (CliCommand.ScanDirectory or CliCommand.Monitor) &&
+            maximumConcurrencySpecified)
+        {
+            return Fail(
+                "--max-concurrency is only valid with scan-directory or monitor.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command != CliCommand.Monitor && debounceSpecified)
+        {
+            return Fail("--debounce-ms is only valid with monitor.", out options, out error);
+        }
+
+        if (!showHelp && command != CliCommand.Monitor && queueCapacitySpecified)
+        {
+            return Fail("--queue-capacity is only valid with monitor.", out options, out error);
         }
 
         if (!showHelp && command != CliCommand.HistoryList && historyLimitSpecified)
@@ -392,6 +477,8 @@ internal sealed record CliOptions(
             historyPath,
             recursive,
             maximumConcurrency,
+            debounceMilliseconds,
+            monitorQueueCapacity,
             historyLimit,
             olderThanDays,
             json,

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using UtoAegis.Core.History;
+using UtoAegis.Core.Monitoring;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
@@ -143,6 +144,122 @@ internal static class JsonLogWriter
             scanId,
             databasePath = Path.GetFullPath(databasePath),
             message
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorStarted(
+        Guid sessionId,
+        string rootPath,
+        bool recursive,
+        int debounceMilliseconds,
+        int queueCapacity)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "file_monitor_started",
+            sessionId,
+            rootPath,
+            recursive,
+            debounceMilliseconds,
+            queueCapacity
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorFileScanned(
+        Guid sessionId,
+        Guid scanId,
+        FileMonitorScanResult result)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = result.Result.IsCompleted ? "information" : "warning",
+            eventName = "monitored_file_scanned",
+            sessionId,
+            scanId,
+            path = result.Path,
+            changeKind = result.ChangeKind.ToString(),
+            detected = result.Result.IsDetected,
+            completed = result.Result.IsCompleted
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorRecoveryCompleted(
+        Guid sessionId,
+        Guid scanId,
+        FileMonitorRecoveryResult result)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = result.Result.Status == DirectoryScanStatus.Completed
+                ? "information"
+                : "warning",
+            eventName = "monitor_recovery_scan_completed",
+            sessionId,
+            scanId,
+            reason = result.Reason.ToString(),
+            status = result.Result.Status.ToString(),
+            fileCount = result.Result.Files.Count,
+            detectedFileCount = result.Result.DetectedFileCount,
+            failedFileCount = result.Result.FailedFileCount,
+            issueCount = result.Result.Issues.Count
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorIssue(Guid sessionId, FileMonitorIssue issue)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "warning",
+            eventName = "file_monitor_issue",
+            sessionId,
+            kind = issue.Kind.ToString(),
+            path = issue.Path,
+            issue.Message,
+            issue.ObservedUtc
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorStopped(Guid sessionId, FileMonitorSummary summary)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "file_monitor_stopped",
+            sessionId,
+            summary.EventCount,
+            summary.FileScanCount,
+            summary.RecoveryScanCount,
+            summary.IssueCount,
+            elapsedMilliseconds = summary.Elapsed.TotalMilliseconds
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void MonitorCancelled(Guid sessionId)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "file_monitor_cancelled",
+            sessionId
         };
 
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));

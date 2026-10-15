@@ -4,6 +4,7 @@ public enum FileMonitorIssueKind
 {
     EventOverflow,
     SourceError,
+    Excluded,
     OutsideRoot,
     ReparsePointSkipped,
     NotARegularFile,

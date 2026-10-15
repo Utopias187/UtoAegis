@@ -9,6 +9,7 @@ public sealed class FileMonitoringEngine
     private readonly IFileMonitorSink _sink;
     private readonly FileMonitorOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly HashSet<string> _excludedPaths;
 
     public FileMonitoringEngine(
         IFileScanner fileScanner,
@@ -22,6 +23,7 @@ public sealed class FileMonitoringEngine
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _options = options ?? new FileMonitorOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _excludedPaths = new HashSet<string>(_options.ExcludedPaths, PathComparer);
     }
 
     public async ValueTask<FileMonitorSummary> RunAsync(
@@ -125,6 +127,7 @@ public sealed class FileMonitoringEngine
                     continue;
                 }
 
+                var scanStartedUtc = _timeProvider.GetUtcNow();
                 var result = await _fileScanner
                     .ScanAsync(change.Path, cancellationToken)
                     .ConfigureAwait(false);
@@ -133,6 +136,7 @@ public sealed class FileMonitoringEngine
                         change.Path,
                         change.ChangeKind,
                         change.ObservedUtc,
+                        scanStartedUtc,
                         _timeProvider.GetUtcNow(),
                         result),
                     cancellationToken);
@@ -209,7 +213,7 @@ public sealed class FileMonitoringEngine
         return ready;
     }
 
-    private static FileMonitorIssue? ValidateFile(
+    private FileMonitorIssue? ValidateFile(
         string rootPath,
         string candidatePath,
         DateTimeOffset observedUtc)
@@ -218,6 +222,15 @@ public sealed class FileMonitoringEngine
         try
         {
             fullPath = Path.GetFullPath(candidatePath);
+            if (_excludedPaths.Contains(fullPath))
+            {
+                return new FileMonitorIssue(
+                    FileMonitorIssueKind.Excluded,
+                    fullPath,
+                    "The changed entry is excluded from monitoring scans.",
+                    observedUtc);
+            }
+
             var relativePath = Path.GetRelativePath(rootPath, fullPath);
             if (Path.IsPathRooted(relativePath) ||
                 relativePath == ".." ||

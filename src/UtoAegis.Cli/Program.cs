@@ -2,11 +2,13 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using UtoAegis.Cli;
 using UtoAegis.Core.History;
+using UtoAegis.Core.Monitoring;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
 using UtoAegis.Infrastructure.Importing;
 using UtoAegis.Infrastructure.History;
+using UtoAegis.Infrastructure.Monitoring;
 using UtoAegis.Infrastructure.Reputation;
 using UtoAegis.Infrastructure.Signatures;
 
@@ -36,6 +38,7 @@ try
     {
         CliCommand.Scan => await RunScanAsync(options, cancellation.Token),
         CliCommand.ScanDirectory => await RunDirectoryScanAsync(options, cancellation.Token),
+        CliCommand.Monitor => await RunMonitorAsync(options, cancellation.Token),
         CliCommand.ImportHashes => await RunImportAsync(options, cancellation.Token),
         CliCommand.HistoryList => await HistoryCommandRunner.ListAsync(options, cancellation.Token),
         CliCommand.HistoryShow => await HistoryCommandRunner.ShowAsync(options, cancellation.Token),
@@ -69,6 +72,11 @@ catch (ScanHistoryStoreException exception)
 {
     Console.Error.WriteLine($"Scan history error: {exception.Message}");
     return ExitCodes.HistoryStoreFailed;
+}
+catch (ArgumentException exception)
+{
+    Console.Error.WriteLine($"Invalid argument: {exception.Message}");
+    return ExitCodeResolver.ForOperationFailure(options.Command);
 }
 catch (UnauthorizedAccessException)
 {
@@ -166,6 +174,80 @@ static async Task<int> RunDirectoryScanAsync(
     return history.Requested && !history.Stored
         ? ExitCodeResolver.ForHistoryWriteFailure(result.HasDetections)
         : ExitCodeResolver.ForDirectory(result);
+}
+
+static async Task<int> RunMonitorAsync(
+    CliOptions options,
+    CancellationToken cancellationToken)
+{
+    var sessionId = Guid.NewGuid();
+    var historyStore = await CreateHistoryStoreAsync(options, cancellationToken);
+    var fileScanner = await CreateFileScannerAsync(options, sessionId, cancellationToken);
+    var excludedPaths = DirectoryScanExclusions(options);
+    var directoryScanner = new DirectoryScanner(
+        fileScanner,
+        new DirectoryScanOptions(
+            recurse: options.Recursive,
+            maximumConcurrency: options.MaximumConcurrency,
+            excludedPaths: excludedPaths));
+    var sink = new CliFileMonitorSink(sessionId, options, historyStore);
+    var engine = new FileMonitoringEngine(
+        fileScanner,
+        directoryScanner,
+        sink,
+        new FileMonitorOptions(
+            TimeSpan.FromMilliseconds(options.DebounceMilliseconds),
+            runInitialScan: true,
+            excludedPaths));
+    await using var source = new FileSystemWatcherEventSource(
+        options.InputPath!,
+        options.Recursive,
+        options.MonitorQueueCapacity,
+        excludedPaths: excludedPaths);
+
+    if (!options.Quiet)
+    {
+        JsonLogWriter.MonitorStarted(
+            sessionId,
+            options.InputPath!,
+            options.Recursive,
+            options.DebounceMilliseconds,
+            options.MonitorQueueCapacity);
+    }
+
+    if (!options.Json)
+    {
+        Console.WriteLine(
+            $"Monitoring {Path.GetFullPath(options.InputPath!)} " +
+            $"(session {sessionId:D}). Press Ctrl+C to stop.");
+    }
+
+    FileMonitorSummary summary;
+    try
+    {
+        summary = await engine.RunAsync(options.InputPath!, source, cancellationToken);
+    }
+    catch (OperationCanceledException)
+    {
+        if (!options.Quiet)
+        {
+            JsonLogWriter.MonitorCancelled(sessionId);
+        }
+
+        throw;
+    }
+
+    if (!options.Quiet)
+    {
+        JsonLogWriter.MonitorStopped(sessionId, summary);
+    }
+
+    if (sink.HistoryWriteFailed)
+    {
+        return ExitCodeResolver.ForHistoryWriteFailure(sink.HasDetections);
+    }
+
+    return sink.HasDetections ? ExitCodes.ThreatDetected : ExitCodes.Success;
 }
 
 static async ValueTask<IFileScanner> CreateFileScannerAsync(
@@ -624,11 +706,12 @@ static void PrintUsage()
 {
     Console.WriteLine(
         """
-        UtoAegis file, directory, hash-reputation, signature, and history scanner
+        UtoAegis file, directory, real-time, reputation, signature, and history scanner
 
         Usage:
           utoaegis [scan] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <file>
           utoaegis scan-directory [--recursive] [--max-concurrency <1-32>] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <directory>
+          utoaegis monitor [--recursive] [--max-concurrency <1-32>] [--debounce-ms <0-60000>] [--queue-capacity <1-65536>] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <directory>
           utoaegis import-hashes --database <path> [--json] [--quiet] <indicators.jsonl>
           utoaegis history list --history <path> [--limit <1-200>] [--json]
           utoaegis history show --history <path> [--json] <scan-id>
@@ -637,6 +720,7 @@ static void PrintUsage()
         Commands:
           scan            Calculate SHA-256 and optionally run reputation and signature checks.
           scan-directory  Scan each regular file in a directory without following reparse points.
+          monitor         Watch a directory and scan changed files until Ctrl+C is pressed.
           import-hashes   Validate and transactionally import JSON Lines indicators.
           history list    List recent stored scan summaries, newest first.
           history show    Show one complete stored scan record.
@@ -644,7 +728,9 @@ static void PrintUsage()
 
         Options:
           --recursive        Include nested directories; disabled by default.
-          --max-concurrency  Concurrent file scans for scan-directory; default 4, maximum 32.
+          --max-concurrency  Concurrent files in directory and recovery scans; default 4, maximum 32.
+          --debounce-ms      Quiet period before scanning a changed file; default 500, maximum 60000.
+          --queue-capacity   Maximum queued file events; default 4096, maximum 65536.
           --database         SQLite reputation database path.
           --signatures       JSON Lines exact-byte signature rule file.
           --history          Separate SQLite database for opt-in scan history.

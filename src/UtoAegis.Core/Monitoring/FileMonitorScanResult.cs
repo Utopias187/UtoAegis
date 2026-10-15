@@ -6,5 +6,6 @@ public sealed record FileMonitorScanResult(
     string Path,
     FileChangeKind ChangeKind,
     DateTimeOffset ObservedUtc,
-    DateTimeOffset ScannedUtc,
+    DateTimeOffset StartedUtc,
+    DateTimeOffset CompletedUtc,
     FileScanResult Result);

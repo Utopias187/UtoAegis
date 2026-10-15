@@ -13,6 +13,7 @@ public sealed class FileSystemWatcherEventSource : IFileMonitorEventSource
     private readonly FileSystemWatcher _watcher;
     private readonly BoundedFileMonitorEventQueue _queue;
     private readonly TimeProvider _timeProvider;
+    private readonly HashSet<string> _excludedPaths;
     private int _disposed;
     private int _readerStarted;
 
@@ -21,6 +22,7 @@ public sealed class FileSystemWatcherEventSource : IFileMonitorEventSource
         bool includeSubdirectories,
         int queueCapacity = DefaultQueueCapacity,
         int internalBufferSize = DefaultInternalBufferSize,
+        IReadOnlyCollection<string>? excludedPaths = null,
         TimeProvider? timeProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -56,6 +58,11 @@ public sealed class FileSystemWatcherEventSource : IFileMonitorEventSource
         }
 
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _excludedPaths = new HashSet<string>(
+            excludedPaths?.Select(Path.GetFullPath) ?? [],
+            OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal);
         _queue = new BoundedFileMonitorEventQueue(queueCapacity, _timeProvider);
         _watcher = new FileSystemWatcher(normalizedRoot)
         {
@@ -142,11 +149,31 @@ public sealed class FileSystemWatcherEventSource : IFileMonitorEventSource
             exception?.Message ?? "The operating-system watcher reported an unknown error."));
     }
 
-    private void PublishFileChange(string path, FileChangeKind changeKind) =>
+    private void PublishFileChange(string path, FileChangeKind changeKind)
+    {
+        string normalizedPath;
+        try
+        {
+            normalizedPath = Path.GetFullPath(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        {
+            _queue.TryPublish(FileMonitorEvent.SourceError(
+                _timeProvider.GetUtcNow(),
+                $"A watcher event contained an invalid path: {exception.Message}"));
+            return;
+        }
+
+        if (_excludedPaths.Contains(normalizedPath))
+        {
+            return;
+        }
+
         _queue.TryPublish(FileMonitorEvent.FileChanged(
-            path,
+            normalizedPath,
             changeKind,
             _timeProvider.GetUtcNow()));
+    }
 
     private void UnsubscribeAndDisposeWatcher()
     {

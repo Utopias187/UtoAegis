@@ -52,7 +52,9 @@ public sealed class CliOptionsTests
 
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
-        Assert.AreEqual("--signatures is only valid with scan or scan-directory.", error);
+        Assert.AreEqual(
+            "--signatures is only valid with scan, scan-directory, or monitor.",
+            error);
     }
 
     [TestMethod]
@@ -120,7 +122,7 @@ public sealed class CliOptionsTests
 
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
-        Assert.AreEqual("--recursive is only valid with scan-directory.", error);
+        Assert.AreEqual("--recursive is only valid with scan-directory or monitor.", error);
     }
 
     [TestMethod]
@@ -140,7 +142,9 @@ public sealed class CliOptionsTests
 
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
-        Assert.AreEqual("--max-concurrency is only valid with scan-directory.", error);
+        Assert.AreEqual(
+            "--max-concurrency is only valid with scan-directory or monitor.",
+            error);
     }
 
     [TestMethod]
@@ -167,6 +171,92 @@ public sealed class CliOptionsTests
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
         Assert.AreEqual("--recursive may only be supplied once.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_MonitorOptions_ReturnExpectedValues()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "monitor",
+                "--recursive",
+                "--max-concurrency",
+                "8",
+                "--debounce-ms",
+                "250",
+                "--queue-capacity",
+                "128",
+                "--history",
+                "history.db",
+                "samples"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.Monitor, options.Command);
+        Assert.AreEqual("samples", options.InputPath);
+        Assert.AreEqual("history.db", options.HistoryPath);
+        Assert.IsTrue(options.Recursive);
+        Assert.AreEqual(8, options.MaximumConcurrency);
+        Assert.AreEqual(250, options.DebounceMilliseconds);
+        Assert.AreEqual(128, options.MonitorQueueCapacity);
+    }
+
+    [TestMethod]
+    public void TryParse_MonitorDefaults_AreBounded()
+    {
+        var parsed = CliOptions.TryParse(
+            ["monitor", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliOptions.DefaultDebounceMilliseconds, options.DebounceMilliseconds);
+        Assert.AreEqual(CliOptions.DefaultMonitorQueueCapacity, options.MonitorQueueCapacity);
+    }
+
+    [TestMethod]
+    public void TryParse_DebounceOutsideAllowedRange_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["monitor", "--debounce-ms", "60001", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--debounce-ms requires an integer from 0 to 60000.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_QueueCapacityOutsideAllowedRange_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["monitor", "--queue-capacity", "0", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--queue-capacity requires an integer from 1 to 65536.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_DebounceWithScan_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan", "--debounce-ms", "250", "sample.bin"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--debounce-ms is only valid with monitor.", error);
     }
 
     [TestMethod]

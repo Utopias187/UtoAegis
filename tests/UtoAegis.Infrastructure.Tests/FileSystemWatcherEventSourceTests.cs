@@ -62,6 +62,26 @@ public sealed class FileSystemWatcherEventSourceTests
     }
 
     [TestMethod]
+    public async Task ReadAllAsync_ExcludedFile_DoesNotEmitItsEvents()
+    {
+        var excludedPath = Path.Combine(_testDirectory, "history.db");
+        var allowedPath = Path.Combine(_testDirectory, "sample.bin");
+        await using var source = new FileSystemWatcherEventSource(
+            _testDirectory,
+            includeSubdirectories: false,
+            excludedPaths: [excludedPath]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await using var events = source.ReadAllAsync(timeout.Token).GetAsyncEnumerator(timeout.Token);
+        var moveNext = events.MoveNextAsync().AsTask();
+
+        await File.WriteAllTextAsync(excludedPath, "state", timeout.Token);
+        await File.WriteAllTextAsync(allowedPath, "sample", timeout.Token);
+        Assert.IsTrue(await moveNext);
+
+        Assert.AreEqual(Path.GetFullPath(allowedPath), events.Current.Path);
+    }
+
+    [TestMethod]
     public async Task BoundedQueue_Overflow_EmitsRecoverySignalAfterQueuedEvent()
     {
         var queue = new BoundedFileMonitorEventQueue(1, TimeProvider.System);

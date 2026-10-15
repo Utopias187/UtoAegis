@@ -14,5 +14,6 @@ internal static class ExitCodes
     public const int ThreatDetected = 10;
     public const int ThreatDetectedWithPartialResults = 11;
     public const int ThreatDetectedWithHistoryFailure = 12;
+    public const int MonitorFailed = 13;
     public const int Cancelled = 130;
 }

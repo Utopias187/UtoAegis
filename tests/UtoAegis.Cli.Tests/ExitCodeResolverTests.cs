@@ -73,6 +73,14 @@ public sealed class ExitCodeResolverTests
             ExitCodeResolver.ForHistoryWriteFailure(detected: false));
     }
 
+    [TestMethod]
+    public void ForOperationFailure_Monitor_ReturnsMonitorFailure()
+    {
+        Assert.AreEqual(
+            ExitCodes.MonitorFailed,
+            ExitCodeResolver.ForOperationFailure(CliCommand.Monitor));
+    }
+
     private static DirectoryScanResult FinishedDirectory(
         FileScanResult file,
         IReadOnlyList<DirectoryScanIssue> issues) =>

@@ -52,6 +52,7 @@ internal static class ExitCodeResolver
     public static int ForOperationFailure(CliCommand command) => command switch
     {
         CliCommand.ScanDirectory => ExitCodes.DirectoryScanFailed,
+        CliCommand.Monitor => ExitCodes.MonitorFailed,
         CliCommand.Scan => ExitCodes.ScanFailed,
         CliCommand.ImportHashes => ExitCodes.ImportFailed,
         _ => ExitCodes.HistoryStoreFailed

@@ -7,7 +7,8 @@ public sealed record FileMonitorOptions
 
     public FileMonitorOptions(
         TimeSpan? debounceDelay = null,
-        bool runInitialScan = true)
+        bool runInitialScan = true,
+        IReadOnlyCollection<string>? excludedPaths = null)
     {
         DebounceDelay = debounceDelay ?? DefaultDebounceDelay;
         if (DebounceDelay < TimeSpan.Zero || DebounceDelay > MaximumDebounceDelay)
@@ -18,9 +19,12 @@ public sealed record FileMonitorOptions
         }
 
         RunInitialScan = runInitialScan;
+        ExcludedPaths = excludedPaths?.Select(Path.GetFullPath).ToArray() ?? [];
     }
 
     public TimeSpan DebounceDelay { get; }
 
     public bool RunInitialScan { get; }
+
+    public IReadOnlyCollection<string> ExcludedPaths { get; }
 }

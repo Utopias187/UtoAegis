@@ -164,6 +164,49 @@ public sealed class FileMonitoringEngineTests
         Assert.AreEqual(FileMonitorIssueKind.SourceError, sink.Issues[0].Kind);
     }
 
+    [TestMethod]
+    public async Task RunAsync_ExcludedPath_IsReportedAndNotScanned()
+    {
+        var path = Path.Combine(_testDirectory, "history.db");
+        await File.WriteAllTextAsync(path, "state");
+        var scanner = new StubFileScanner();
+        var sink = new RecordingSink();
+        var source = new StubEventSource(
+            [FileMonitorEvent.FileChanged(path, FileChangeKind.Changed, DateTimeOffset.UtcNow)]);
+        var engine = new FileMonitoringEngine(
+            scanner,
+            new StubDirectoryScanner(),
+            sink,
+            new FileMonitorOptions(
+                TimeSpan.Zero,
+                runInitialScan: false,
+                excludedPaths: [path]));
+
+        var summary = await engine.RunAsync(_testDirectory, source);
+
+        Assert.AreEqual(0L, summary.FileScanCount);
+        Assert.AreEqual(1L, summary.IssueCount);
+        Assert.AreEqual(0, scanner.ScanCount);
+        Assert.AreEqual(FileMonitorIssueKind.Excluded, sink.Issues[0].Kind);
+    }
+
+    [TestMethod]
+    public async Task RunAsync_CancellationWhileWaiting_StopsPromptly()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        var engine = new FileMonitoringEngine(
+            new StubFileScanner(),
+            new StubDirectoryScanner(),
+            new RecordingSink(),
+            new FileMonitorOptions(TimeSpan.Zero, runInitialScan: false));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await engine.RunAsync(
+                _testDirectory,
+                new WaitingEventSource(),
+                cancellation.Token));
+    }
+
     private sealed class StubEventSource(IReadOnlyList<FileMonitorEvent> events)
         : IFileMonitorEventSource
     {
@@ -201,6 +244,18 @@ public sealed class FileMonitoringEngineTests
                 Signatures: null);
             return ValueTask.FromResult(result);
         }
+    }
+
+    private sealed class WaitingEventSource : IFileMonitorEventSource
+    {
+        public async IAsyncEnumerable<FileMonitorEvent> ReadAllAsync(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            yield break;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class StubDirectoryScanner : IDirectoryScanner
