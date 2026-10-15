@@ -377,3 +377,115 @@ Add detection history and structured logging behind an independent persistence
 interface. Store scan-level and per-file outcomes, define retention and privacy
 policies, and avoid mixing append-only operational history with the trusted
 reputation database.
+
+## 2026-10-15 — Milestone 5: detection history and structured logging
+
+### Goal
+
+Make scan outcomes auditable across CLI invocations without coupling the scan
+engines to one database. Preserve enough structured evidence to explain a
+detection or failure while keeping persistence optional because paths and
+hashes are sensitive operational data.
+
+### Design and data flow
+
+- `IScanHistoryStore` defines initialization, immutable append, summary listing,
+  full-record retrieval, and retention pruning independently of SQLite.
+- `ScanHistoryRecord` projects file and directory results into one stable model
+  containing target metadata, timing, outcome, files, signature matches, and
+  traversal issues.
+- `SqliteScanHistoryStore` uses a database separate from malicious reputation
+  data. An application ID and schema version reject unrelated or newer files.
+- One transaction inserts a scan header and all child rows. Duplicate scan IDs
+  fail, and a failed child insert rolls back the complete record.
+- Summary queries are capped at 200 rows. Full records validate stored counts
+  against their file, detection, failure, match, and issue details.
+- Foreign-key cascades make retention deletion atomic for each scan graph.
+- Every scan receives a GUID used by operational JSON Lines logs, persisted
+  history, JSON results, and `history show`.
+
+```text
+scan result -> history projection -> IScanHistoryStore -> SQLite transaction
+     |                                                        |
+     +-> correlated JSON Lines logs                           +-> list/show/prune
+```
+
+History capture is enabled with `--history <path>`. `history list` returns
+recent summaries, `history show` returns one complete record, and `history
+prune --older-than-days <days>` deletes records before the calculated UTC
+cutoff. A missing database is rejected by management commands rather than
+silently created after a path typo.
+
+### Failure and exit-code behavior
+
+- History initialization failure prevents a requested history-enabled scan
+  from starting and returns exit code `9`.
+- A post-scan write failure returns `9` when there was no detection and `12`
+  when there was a detection. Code `12` preserves both facts: security evidence
+  was found, and the requested audit record was not stored.
+- Operational logs use standard error, result output uses standard output, and
+  `--quiet` suppresses logs without suppressing storage failures.
+- A history database and its `-wal` and `-shm` sidecars are excluded when they
+  fall inside a directory target. The exclusions remain visible as partial
+  coverage rather than being silently omitted.
+
+### Security and privacy review
+
+- History contains paths, SHA-256 values, timestamps, malware-family and source
+  metadata, signature rule details, offsets, and errors. It is opt-in and needs
+  directory permissions, backup controls, and a retention policy appropriate
+  for the machine and organization.
+- The database is structured and transactionally consistent but is not
+  encrypted, signed, or tamper-evident. It must not be treated as trustworthy
+  forensic evidence after a local attacker gains write access.
+- History is operational data and is not joined into the trusted reputation
+  database. Compromise or pruning of history therefore does not change scan
+  verdicts.
+- Parameterized writes prevent scan-controlled values from becoming SQL. Strict
+  tables, foreign keys, application identity, schema versioning, and count
+  validation catch common corruption or wrong-database mistakes.
+- Retention is explicit instead of automatic. This avoids surprising data loss,
+  but deployment policy must schedule pruning and monitor database growth.
+
+### Verification
+
+- Locked restore and release build completed on .NET 10 with zero warnings and
+  zero errors.
+- All 113 automated tests passed: 57 core, 34 infrastructure, and 22 CLI tests.
+- Tests cover projection, schema identity, rich-result round trips, immutable
+  IDs, transactional rollback, newest-first limits, missing records, retention
+  cascades, internal count validation, parser rules, and exit-code precedence.
+- A 2,000-file append-and-read smoke test completed inside its 30-second limit;
+  the complete infrastructure test assembly ran in approximately three seconds
+  on the development machine. This is a regression signal, not a production
+  service-level guarantee.
+- End-to-end CLI verification captured a real scan, listed it, retrieved the
+  same record by scan ID, and exercised retention without deleting the new row.
+
+### Known limitations
+
+- History is local and SQLite-backed; there is no remote collector, forwarding,
+  export command, dashboard, or multi-host identity.
+- Full-record retrieval materializes every stored file and match in memory.
+- Retention is manual and does not compact the SQLite file automatically.
+- There are no tamper-evident hashes, signatures, encryption-at-rest controls,
+  or operating-system event-log integration.
+- Scans are still initiated manually; filesystem changes are not monitored.
+
+### Definition of done
+
+- [x] Storage-neutral contracts preserve scan, file, match, and issue details.
+- [x] History data uses an independent, identified, versioned database.
+- [x] Complete records are appended atomically and duplicate IDs are rejected.
+- [x] Operators can list, inspect, and prune history through the CLI.
+- [x] Logs, output, and stored records share one scan correlation ID.
+- [x] Privacy, retention, failure precedence, and integrity limits are explicit.
+- [x] Rollback, corruption, retention, CLI, and performance paths are tested.
+
+### Next milestone
+
+Add real-time file monitoring behind an independent event-source interface.
+Filesystem events should enter a bounded, debounced queue, watcher overflow
+must trigger a visible recovery scan, and the monitor should reuse the current
+scanner and history contracts. Quarantine and automatic deletion remain out of
+scope until identity revalidation and recovery semantics are designed.

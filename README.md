@@ -2,19 +2,19 @@
 
 UtoAegis is an incrementally developed Windows endpoint-security product. It
 currently combines safe SHA-256 hashing, a versioned local reputation database,
-streaming exact-byte signature detection, and bounded directory traversal. It
-does not execute scanned files.
+streaming exact-byte signature detection, bounded directory traversal, and
+opt-in structured scan history. It does not execute scanned files.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
 ## Current architecture
 
-- `UtoAegis.Core` contains file and directory scanner contracts, result models,
-  validation, and hash, reputation, and signature engines. It has no SQLite
-  dependency.
-- `UtoAegis.Infrastructure` contains the SQLite reputation store and strict
-  JSON Lines readers for indicators and signature rules.
+- `UtoAegis.Core` contains file, directory, and history contracts, result
+  models, validation, and hash, reputation, and signature engines. It has no
+  SQLite dependency.
+- `UtoAegis.Infrastructure` contains separate SQLite reputation and scan-history
+  stores plus strict JSON Lines readers for indicators and signature rules.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 
@@ -24,6 +24,7 @@ single file ------------------------------------------|-> composite file scanner
                                                        |-> SHA-256 -> reputation
                                                        |-> fixed-byte signatures
                                                        |-> one explicit file result
+                                                       |-> optional history store
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -114,6 +115,45 @@ Every exclusion or skipped entry is reported, which makes the overall result
 `Partial` instead of implying complete coverage. `--json` returns a structured
 summary, issues, and every per-file result.
 
+## Detection history and structured logs
+
+History is disabled unless `--history` is supplied. Keep its SQLite database
+separate from the reputation database:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- scan `
+  --history data/history.db README.md
+
+dotnet run --project src/UtoAegis.Cli -- scan-directory `
+  --recursive --history data/history.db samples
+```
+
+Each stored scan has a correlation ID and includes its target, timestamps,
+outcome, per-file hashes and detection signals, signature matches, failures,
+and traversal issues. Recent summaries and full records can be queried in human
+or JSON form:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- history list `
+  --history data/history.db --limit 25
+
+dotnet run --project src/UtoAegis.Cli -- history show `
+  --history data/history.db <scan-id>
+```
+
+Retention is an explicit operator action. This deletes complete scan records
+and their related file, match, and issue rows in one cascading operation:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- history prune `
+  --history data/history.db --older-than-days 30
+```
+
+Operational JSON Lines logs are written to standard error and share the same
+scan ID. `--quiet` suppresses those logs but does not disable requested history
+storage or hide errors. History databases and SQLite sidecars inside a scanned
+directory are excluded and reported rather than scanned as ordinary files.
+
 ## Indicator format
 
 Imports use one JSON object per line:
@@ -173,8 +213,10 @@ a clean-file verdict.
 | `6` | Signature rules could not load or signature scanning failed. |
 | `7` | Directory traversal could not start or exceeded a safety limit. |
 | `8` | Directory scan completed partially without a detection. |
+| `9` | Requested history initialization, storage, or management failed. |
 | `10` | A malicious-hash or signature match was detected in a complete scan. |
 | `11` | A detection occurred, but the directory scan was partial. |
+| `12` | A detection occurred, but its requested history record could not be stored. |
 | `130` | Operation was cancelled. |
 
 ## Security review
@@ -202,6 +244,13 @@ a clean-file verdict.
 - Directory discovery and retained results use memory proportional to the
   bounded file count. The scanner refuses to scan a partial discovery set when
   a hard file or directory limit is exceeded.
+- Scan history uses its own identified, versioned SQLite schema with strict
+  tables, foreign keys, parameterized writes, and one transaction per record.
+  Duplicate scan IDs are rejected instead of replacing audit data.
+- History is opt-in because it stores sensitive paths, hashes, rule metadata,
+  and failure details. The database is neither encrypted nor tamper-evident;
+  operators must restrict file access, back it up appropriately, and apply a
+  retention policy with `history prune`.
 - Paths in logs can disclose usernames or directory structures. Production log
   storage needs access controls and a retention policy.
 - A repeated hash import updates its stored source metadata. Source trust and
@@ -254,7 +303,17 @@ a clean-file verdict.
 - [x] Added human and JSON CLI output with distinct partial-result exit codes.
 - [x] Added race, failure, limit, cancellation, and 1,000-file smoke tests.
 
-The next milestone is detection history and structured logging. It should store
-scan-level and per-file outcomes behind an independent interface, define
-retention and privacy behavior, and keep security data separate from
-operational history.
+### Milestone 5 — Detection history and structured logging
+
+- [x] Added storage-neutral history contracts and explicit scan outcomes.
+- [x] Added an identified, versioned SQLite history schema separate from reputation data.
+- [x] Stored scans, file results, signature matches, and traversal issues atomically.
+- [x] Added opt-in capture plus list, show, and age-based prune commands.
+- [x] Correlated JSON Lines events and stored records with one scan ID.
+- [x] Added explicit history-failure exit codes without losing detection signals.
+- [x] Added rollback, identity, consistency, retention, and 2,000-file smoke tests.
+
+The next milestone is real-time file monitoring. It should feed filesystem
+events through a bounded, debounced queue into the existing scanner, detect
+watcher overflow, and recover with an explicit rescan without adding quarantine
+or automatic deletion yet.
