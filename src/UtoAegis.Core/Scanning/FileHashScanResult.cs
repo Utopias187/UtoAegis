@@ -32,7 +32,7 @@ public sealed record FileHashScanResult
 
     public bool IsSuccess => Status == FileHashScanStatus.Success;
 
-    internal static FileHashScanResult Success(
+    public static FileHashScanResult Success(
         string path,
         string sha256,
         long fileSizeBytes,
@@ -45,7 +45,7 @@ public sealed record FileHashScanResult
             elapsed,
             errorMessage: null);
 
-    internal static FileHashScanResult Failure(
+    public static FileHashScanResult Failure(
         FileHashScanStatus status,
         string? path,
         TimeSpan elapsed,
