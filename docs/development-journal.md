@@ -276,3 +276,104 @@ Build directory and recursive scanning on top of the existing single-file
 engines. Traversal must bound concurrency, avoid directory links by default,
 continue after per-file failures, and produce a deterministic summary without
 calling any `NoMatch` or `Unknown` file clean.
+
+## 2026-10-15 — Milestone 4: directory and recursive scanner
+
+### Goal
+
+Apply the established hash, reputation, and signature stages to a directory
+without turning traversal into an unbounded or misleading operation. Preserve
+an explicit outcome for each scanned file and distinguish complete, partial,
+failed, and detected runs for both people and automation.
+
+### Design and data flow
+
+- `IFileScanner` and `CompositeFileScanner` compose the existing per-file
+  stages and enforce one cross-stage metadata-consistency boundary.
+- `IDirectoryScanner` and `DirectoryScanner` discover regular files before
+  scanning them with bounded asynchronous concurrency.
+- Nonrecursive traversal is the default; recursion requires `--recursive`.
+- Default limits are 100,000 files, 50,000 directories, depth 64, and four
+  concurrent scans. The corresponding absolute maxima are 1,000,000, 250,000,
+  256, and 32.
+- A hard discovery-limit failure prevents scanning an incomplete file set.
+- Files and issues are sorted with ordinal path ordering so output does not
+  depend on filesystem enumeration or task completion order.
+- Configured rule and database files are excluded from directory scans. SQLite
+  sidecar files are also excluded. Exclusions remain visible as issues and make
+  the result partial.
+
+```text
+root -> bounded discovery -> sorted regular files -> bounded workers
+                                                  -> composite file scanner
+                                                  -> per-file results + summary
+```
+
+The CLI exposes `scan-directory`, `--recursive`, and `--max-concurrency` while
+reusing `--database`, `--signatures`, `--json`, and `--quiet`. Exit code `7`
+means the directory scan failed, `8` means partial without a detection, `10`
+means detection in a complete scan, and `11` means detection with partial
+coverage.
+
+### Security review
+
+- A reparse-point root is rejected and discovered file or directory reparse
+  points are skipped. The scanner does not intentionally leave the requested
+  tree through junctions or symbolic links.
+- Every discovered file is revalidated immediately before its scan. A file
+  that disappears, becomes a directory, or becomes a reparse point is skipped
+  and reported rather than silently accepted.
+- Filesystem checks remain best effort. Entries can change after validation,
+  and metadata checks cannot prove stable identity against a capable local
+  attacker. A future enforcement action must reopen and revalidate its target.
+- Traversal work, concurrency, and retained result counts are bounded. The
+  current discovery-first design still uses memory proportional to the number
+  of discovered files, up to the configured limit.
+- Access-denied, disappeared, excluded, and I/O-affected entries make the run
+  partial. The interface never describes `Unknown` or `NoMatch` as clean.
+- Paths are included in results and operational logs. Retention, access
+  control, and path minimization are requirements for persistent history.
+
+### Verification
+
+- Locked restore and release build completed on .NET 10 with zero warnings and
+  zero errors.
+- All 91 automated tests passed: 54 core, 22 infrastructure, and 15 CLI tests.
+- Tests cover recursive and nonrecursive traversal, stable ordering, reparse
+  handling, depth and item limits, invalid roots, partial results, cancellation,
+  bounded concurrency, CLI parsing, and exit-code precedence.
+- A race test removes a file after discovery and confirms it is skipped and
+  reported during pre-scan revalidation.
+- A real 1,000-file recursive SHA-256 smoke scan completed inside its 30-second
+  limit; the complete core test assembly ran in approximately five seconds on
+  the development machine. This is a regression signal, not a production SLA.
+- End-to-end CLI checks verified complete, partial, detected, failed, human,
+  and JSON result paths.
+
+### Known limitations
+
+- Traversal is discovery-first rather than streamed through a bounded channel.
+  This simplifies deterministic limits but retains all discovered paths and
+  all completed results in memory.
+- Reparse-point avoidance and metadata checks do not provide a transactional
+  filesystem snapshot.
+- There is no ignore-pattern language, incremental scan cache, archive
+  expansion, scheduled scanning, or quarantine.
+- Results are returned and logged but are not persisted as detection history.
+
+### Definition of done
+
+- [x] Existing per-file engines are composed behind a reusable interface.
+- [x] Directory and opt-in recursive discovery have explicit safety limits.
+- [x] Link handling, entry changes, partial coverage, and failures are visible.
+- [x] File work is parallel but bounded; final results are deterministic.
+- [x] CLI human, JSON, logging, and exit-code behavior are integrated.
+- [x] Race, cancellation, failure, limit, and performance paths are tested.
+- [x] Security assumptions, memory behavior, and limitations are documented.
+
+### Next milestone
+
+Add detection history and structured logging behind an independent persistence
+interface. Store scan-level and per-file outcomes, define retention and privacy
+policies, and avoid mixing append-only operational history with the trusted
+reputation database.

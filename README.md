@@ -2,24 +2,28 @@
 
 UtoAegis is an incrementally developed Windows endpoint-security product. It
 currently combines safe SHA-256 hashing, a versioned local reputation database,
-and streaming exact-byte signature detection. It does not execute scanned files.
+streaming exact-byte signature detection, and bounded directory traversal. It
+does not execute scanned files.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
 ## Current architecture
 
-- `UtoAegis.Core` contains hash, reputation, and signature contracts, result
-  models, validation, and scanning engines. It has no SQLite dependency.
+- `UtoAegis.Core` contains file and directory scanner contracts, result models,
+  validation, and hash, reputation, and signature engines. It has no SQLite
+  dependency.
 - `UtoAegis.Infrastructure` contains the SQLite reputation store and strict
   JSON Lines readers for indicators and signature rules.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 
 ```text
-                         |-> SHA-256 -> reputation store -> Malicious / Unknown / failure
-file path -> CLI engine -|
-                         |-> fixed-byte scanner -> Detected / NoMatch / failure
+directory -> bounded traversal -> regular file paths -|
+single file ------------------------------------------|-> composite file scanner
+                                                       |-> SHA-256 -> reputation
+                                                       |-> fixed-byte signatures
+                                                       |-> one explicit file result
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -78,6 +82,38 @@ dotnet run --project src/UtoAegis.Cli -- scan `
   samples/harmless-test-file.txt
 ```
 
+## Directory scanning
+
+Scan only the regular files immediately inside a directory:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- scan-directory samples
+```
+
+Recursion is opt-in. The same reputation and signature stages can be applied to
+every discovered file with bounded parallelism:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- scan-directory `
+  --recursive `
+  --max-concurrency 4 `
+  --database data/reputation.db `
+  --signatures samples/signatures.example.jsonl `
+  samples
+```
+
+The scanner does not follow reparse points. It discovers a bounded file set,
+sorts results deterministically, and continues after individual file failures.
+The default limits are 100,000 files, 50,000 directories, a traversal depth of
+64, and four concurrent file scans. The library also enforces absolute maxima
+of 1,000,000 files, 250,000 directories, depth 256, and concurrency 32.
+
+Configured signature and reputation database files, including SQLite `-wal`
+and `-shm` files, are excluded when they are inside the requested directory.
+Every exclusion or skipped entry is reported, which makes the overall result
+`Partial` instead of implying complete coverage. `--json` returns a structured
+summary, issues, and every per-file result.
+
 ## Indicator format
 
 Imports use one JSON object per line:
@@ -135,7 +171,10 @@ a clean-file verdict.
 | `4` | Hashing succeeded but reputation lookup failed. |
 | `5` | Indicator import or database initialization failed. |
 | `6` | Signature rules could not load or signature scanning failed. |
-| `10` | A malicious-hash or signature match was detected. |
+| `7` | Directory traversal could not start or exceeded a safety limit. |
+| `8` | Directory scan completed partially without a detection. |
+| `10` | A malicious-hash or signature match was detected in a complete scan. |
+| `11` | A detection occurred, but the directory scan was partial. |
 | `130` | Operation was cancelled. |
 
 ## Security review
@@ -156,6 +195,13 @@ a clean-file verdict.
   modify them.
 - A later enforcement or quarantine action must revalidate file identity at the
   point of action; path and metadata checks cannot eliminate every race.
+- Directory scans reject a reparse-point root, never follow discovered reparse
+  points, and revalidate entries immediately before scanning. These controls
+  reduce traversal and replacement races but cannot eliminate filesystem
+  time-of-check/time-of-use risk.
+- Directory discovery and retained results use memory proportional to the
+  bounded file count. The scanner refuses to scan a partial discovery set when
+  a hard file or directory limit is exceeded.
 - Paths in logs can disclose usernames or directory structures. Production log
   storage needs access controls and a retention policy.
 - A repeated hash import updates its stored source metadata. Source trust and
@@ -198,6 +244,17 @@ a clean-file verdict.
 - [x] Added detection, no-match, failure, cancellation, mutation, and parser tests.
 - [x] Added a 16 MiB / 32-rule performance smoke test.
 
-The next milestone is directory and recursive scanning. It should reuse the
-existing engines, bound concurrency, avoid following unsafe links by default,
-and preserve one explicit result per file.
+### Milestone 4 — Directory scanner
+
+- [x] Added a reusable composite per-file detection pipeline.
+- [x] Added nonrecursive scanning with explicit opt-in recursion.
+- [x] Bounded traversal depth, file count, directory count, and concurrency.
+- [x] Rejected or skipped reparse points and revalidated files before scanning.
+- [x] Preserved deterministic per-file results, traversal issues, and summaries.
+- [x] Added human and JSON CLI output with distinct partial-result exit codes.
+- [x] Added race, failure, limit, cancellation, and 1,000-file smoke tests.
+
+The next milestone is detection history and structured logging. It should store
+scan-level and per-file outcomes behind an independent interface, define
+retention and privacy behavior, and keep security data separate from
+operational history.
