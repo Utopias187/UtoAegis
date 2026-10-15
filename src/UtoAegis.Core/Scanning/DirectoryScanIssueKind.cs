@@ -6,6 +6,7 @@ public enum DirectoryScanIssueKind
     Excluded,
     ReparsePointSkipped,
     DepthLimitReached,
+    EntryChanged,
     EntryDisappeared,
     IoError
 }

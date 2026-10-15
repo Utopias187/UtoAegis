@@ -119,6 +119,7 @@ public sealed class DirectoryScanner : IDirectoryScanner
         }
 
         var scanResults = new ConcurrentBag<DirectoryFileScanResult>();
+        var scanIssues = new ConcurrentBag<DirectoryScanIssue>(discovery.Issues);
         await Parallel.ForEachAsync(
             discovery.Files,
             new ParallelOptions
@@ -128,6 +129,12 @@ public sealed class DirectoryScanner : IDirectoryScanner
             },
             async (filePath, token) =>
             {
+                if (!TryValidateDiscoveredFile(filePath, out var issue))
+                {
+                    scanIssues.Add(issue!);
+                    return;
+                }
+
                 var result = await _fileScanner.ScanAsync(filePath, token).ConfigureAwait(false);
                 scanResults.Add(new DirectoryFileScanResult(filePath, result));
             }).ConfigureAwait(false);
@@ -136,7 +143,7 @@ public sealed class DirectoryScanner : IDirectoryScanner
         var orderedResults = scanResults
             .OrderBy(result => result.Path, StringComparer.Ordinal)
             .ToArray();
-        var orderedIssues = discovery.Issues
+        var orderedIssues = scanIssues
             .OrderBy(issue => issue.Path, StringComparer.Ordinal)
             .ThenBy(issue => issue.Kind)
             .ToArray();
@@ -145,6 +152,61 @@ public sealed class DirectoryScanner : IDirectoryScanner
             orderedResults,
             orderedIssues,
             stopwatch.Elapsed);
+    }
+
+    private static bool TryValidateDiscoveredFile(
+        string path,
+        out DirectoryScanIssue? issue)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                issue = new DirectoryScanIssue(
+                    path,
+                    DirectoryScanIssueKind.ReparsePointSkipped,
+                    "The entry became a reparse point before scanning and was not followed.");
+                return false;
+            }
+
+            if (attributes.HasFlag(FileAttributes.Directory))
+            {
+                issue = new DirectoryScanIssue(
+                    path,
+                    DirectoryScanIssueKind.EntryChanged,
+                    "The discovered file became a directory before scanning.");
+                return false;
+            }
+
+            issue = null;
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            issue = new DirectoryScanIssue(
+                path,
+                DirectoryScanIssueKind.AccessDenied,
+                "Access to the discovered file was denied before scanning.");
+            return false;
+        }
+        catch (Exception exception) when (
+            exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            issue = new DirectoryScanIssue(
+                path,
+                DirectoryScanIssueKind.EntryDisappeared,
+                "The discovered file disappeared before scanning.");
+            return false;
+        }
+        catch (IOException)
+        {
+            issue = new DirectoryScanIssue(
+                path,
+                DirectoryScanIssueKind.IoError,
+                "The discovered file could not be revalidated because of an I/O error.");
+            return false;
+        }
     }
 
     private DiscoveryResult DiscoverFiles(

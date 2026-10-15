@@ -87,6 +87,54 @@ public sealed class DirectoryScannerTests
     }
 
     [TestMethod]
+    public async Task ScanAsync_FileDisappearsAfterDiscovery_IsSkippedAndReported()
+    {
+        var trigger = await CreateFileAsync("a-trigger.txt");
+        var disappearing = await CreateFileAsync("b-disappearing.txt");
+        var fileScanner = new RecordingFileScanner(onScan: path =>
+        {
+            if (path == trigger)
+            {
+                File.Delete(disappearing);
+            }
+        });
+        var scanner = new DirectoryScanner(
+            fileScanner,
+            new DirectoryScanOptions(maximumConcurrency: 1));
+
+        var result = await scanner.ScanAsync(_testDirectory);
+
+        Assert.AreEqual(DirectoryScanStatus.Partial, result.Status);
+        Assert.HasCount(1, result.Files);
+        Assert.AreEqual(trigger, result.Files[0].Path);
+        Assert.IsTrue(result.Issues.Any(issue =>
+            issue.Path == disappearing &&
+            issue.Kind == DirectoryScanIssueKind.EntryDisappeared));
+    }
+
+    [TestMethod]
+    [Timeout(30_000)]
+    public async Task ScanAsync_OneThousandFilesWithRealHashing_Completes()
+    {
+        for (var index = 0; index < 1_000; index++)
+        {
+            await CreateFileAsync(Path.Combine(
+                $"group-{index % 10:D2}",
+                $"file-{index:D4}.txt"));
+        }
+
+        var scanner = new DirectoryScanner(
+            new CompositeFileScanner(new Sha256FileHashScanner()),
+            new DirectoryScanOptions(recurse: true, maximumConcurrency: 4));
+
+        var result = await scanner.ScanAsync(_testDirectory);
+
+        Assert.AreEqual(DirectoryScanStatus.Completed, result.Status);
+        Assert.HasCount(1_000, result.Files);
+        Assert.IsTrue(result.Files.All(file => file.Result.FileHash.IsSuccess));
+    }
+
+    [TestMethod]
     public async Task ScanAsync_PerFileFailure_ReturnsPartialResult()
     {
         await CreateFileAsync("good.txt");
@@ -285,7 +333,8 @@ public sealed class DirectoryScannerTests
 
     private sealed class RecordingFileScanner(
         Func<string, FileScanResult>? resultSelector = null,
-        Func<string, int>? delaySelector = null) : IFileScanner
+        Func<string, int>? delaySelector = null,
+        Action<string>? onScan = null) : IFileScanner
     {
         private readonly Func<string, FileScanResult> _resultSelector =
             resultSelector ?? SuccessfulFile;
@@ -321,6 +370,7 @@ public sealed class DirectoryScannerTests
             UpdateMaximum(active);
             try
             {
+                onScan?.Invoke(path);
                 var delay = _delaySelector(path);
                 if (delay > 0)
                 {
