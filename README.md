@@ -3,18 +3,19 @@
 UtoAegis is an incrementally developed Windows endpoint-security product. It
 currently combines safe SHA-256 hashing, a versioned local reputation database,
 streaming exact-byte signature detection, bounded directory traversal, and
-opt-in structured scan history. It does not execute scanned files.
+opt-in structured scan history with real-time directory monitoring. It does not
+execute scanned files or automatically delete them.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
 ## Current architecture
 
-- `UtoAegis.Core` contains file, directory, and history contracts, result
-  models, validation, and hash, reputation, and signature engines. It has no
-  SQLite dependency.
+- `UtoAegis.Core` contains file, directory, history, and monitoring contracts,
+  result models, validation, orchestration, and hash, reputation, and signature
+  engines. It has no SQLite dependency.
 - `UtoAegis.Infrastructure` contains separate SQLite reputation and scan-history
-  stores plus strict JSON Lines readers for indicators and signature rules.
+  stores, strict JSON Lines readers, and the bounded filesystem event source.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 
@@ -25,6 +26,8 @@ single file ------------------------------------------|-> composite file scanner
                                                        |-> fixed-byte signatures
                                                        |-> one explicit file result
                                                        |-> optional history store
+filesystem events -> bounded queue -> debounce --------|
+                         | overflow -> recovery directory scan
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -114,6 +117,37 @@ and `-shm` files, are excluded when they are inside the requested directory.
 Every exclusion or skipped entry is reported, which makes the overall result
 `Partial` instead of implying complete coverage. `--json` returns a structured
 summary, issues, and every per-file result.
+
+## Real-time file monitoring
+
+Start the watcher before the initial directory scan, then scan files as they
+are created, changed, or renamed:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- monitor `
+  --recursive `
+  --database data/reputation.db `
+  --signatures samples/signatures.example.jsonl `
+  --history data/history.db `
+  samples
+```
+
+The monitor runs until Ctrl+C. Events for the same path are debounced for 500
+milliseconds by default, and the managed event queue is capped at 4,096 items.
+Use `--debounce-ms` and `--queue-capacity` to tune those limits. Recovery scans
+reuse `--max-concurrency`, whose default is four.
+
+Both the operating-system watcher buffer and the managed queue can overflow.
+An overflow is reported as an issue, pending per-file events are discarded, and
+a full directory recovery scan runs so event loss is never treated as complete
+coverage. Source errors remain visible but do not silently become detections.
+Configured rule, reputation, and history files plus their SQLite sidecars are
+excluded at the watcher and scanner boundaries to prevent self-triggering loops.
+
+With `--json`, standard output is a JSON Lines stream containing a separate
+`recoveryScan`, `fileScan`, or `monitorIssue` object for each result. Requested
+history is appended per scan. Operational JSON Lines logs remain on standard
+error and can be suppressed with `--quiet`.
 
 ## Detection history and structured logs
 
@@ -217,6 +251,7 @@ a clean-file verdict.
 | `10` | A malicious-hash or signature match was detected in a complete scan. |
 | `11` | A detection occurred, but the directory scan was partial. |
 | `12` | A detection occurred, but its requested history record could not be stored. |
+| `13` | Real-time monitoring could not start or failed because of a filesystem operation. |
 | `130` | Operation was cancelled. |
 
 ## Security review
@@ -253,6 +288,16 @@ a clean-file verdict.
   retention policy with `history prune`.
 - Paths in logs can disclose usernames or directory structures. Production log
   storage needs access controls and a retention policy.
+- Real-time monitoring starts the watcher before its initial scan, debounces
+  bursts, bounds its managed queue, and converts watcher or queue overflow into
+  an explicit recovery scan. Filesystems can still coalesce, reorder, or delay
+  notifications, so the watcher is a best-effort signal rather than an audit
+  log or transactional snapshot.
+- Changed entries are revalidated as regular files inside the monitored root
+  immediately before scanning. Reparse points are not followed, but replacement
+  races remain possible after validation.
+- Detection is currently observational. No file is quarantined, deleted, or
+  modified automatically.
 - A repeated hash import updates its stored source metadata. Source trust and
   multi-source consensus are intentionally deferred until threat-intelligence
   integration.
@@ -313,7 +358,17 @@ a clean-file verdict.
 - [x] Added explicit history-failure exit codes without losing detection signals.
 - [x] Added rollback, identity, consistency, retention, and 2,000-file smoke tests.
 
-The next milestone is real-time file monitoring. It should feed filesystem
-events through a bounded, debounced queue into the existing scanner, detect
-watcher overflow, and recover with an explicit rescan without adding quarantine
-or automatic deletion yet.
+### Milestone 6 — Real-time file monitoring
+
+- [x] Added an event-source boundary and Windows filesystem watcher adapter.
+- [x] Started watching before the initial recovery scan to reduce startup gaps.
+- [x] Added per-path debounce and bounded, configurable event buffering.
+- [x] Converted operating-system and managed-queue overflow into visible recovery scans.
+- [x] Revalidated paths, rejected reparse points, and excluded scanner data files.
+- [x] Added human and JSON Lines output, correlated logs, and opt-in history capture.
+- [x] Added event, overflow, exclusion, cancellation, CLI, and live watcher tests.
+
+The next milestone is safe quarantine and recovery. It must revalidate file
+identity at the point of action, use a restricted non-executable store, preserve
+metadata needed for restoration, and avoid permanent deletion until recovery
+semantics and tamper resistance are tested.

@@ -489,3 +489,125 @@ Filesystem events should enter a bounded, debounced queue, watcher overflow
 must trigger a visible recovery scan, and the monitor should reuse the current
 scanner and history contracts. Quarantine and automatic deletion remain out of
 scope until identity revalidation and recovery semantics are designed.
+
+## 2026-10-15 — Milestone 6: real-time file monitoring
+
+### Goal
+
+Continuously apply the existing detection pipeline to filesystem changes while
+making dropped events, partial coverage, and operational failures visible. Keep
+monitoring observational until quarantine identity and recovery guarantees are
+designed and tested.
+
+### Design and data flow
+
+- `IFileMonitorEventSource` keeps the orchestration independent of one watcher
+  implementation and makes event streams deterministic in tests.
+- `FileSystemWatcherEventSource` begins watching during construction, before
+  the initial directory recovery scan starts. It publishes created, changed,
+  and renamed paths through a bounded channel.
+- `FileMonitoringEngine` performs an initial recovery scan, debounces event
+  bursts by normalized path, revalidates each changed entry, and invokes the
+  existing composite file scanner.
+- The default debounce interval is 500 milliseconds. It can be configured from
+  zero to 60 seconds with `--debounce-ms`.
+- The managed queue defaults to 4,096 events and can be configured from 1 to
+  65,536 with `--queue-capacity`. The operating-system watcher buffer defaults
+  to 16 KiB and is capped at 64 KiB.
+- Overflow from either buffer becomes an explicit event. Pending per-file work
+  is cleared and a full recovery scan runs instead of claiming complete event
+  coverage.
+- Rule, reputation, and history files and SQLite sidecars are excluded by both
+  the watcher adapter and scan validation. This prevents monitor-generated
+  history writes from feeding back into the scanner.
+- Every changed-file or recovery result receives its own scan ID for optional
+  history storage. A separate session ID correlates the long-running monitor's
+  operational logs and JSON Lines output.
+
+```text
+filesystem notifications -> bounded queue -> per-path debounce -> validate
+           | overflow ------------------------------------------> recovery scan
+                                                               -> file scanner
+                                                               -> output/history
+```
+
+### Failure and output behavior
+
+- Ctrl+C cancels the event wait and returns exit code `130`.
+- Files that disappear before their debounce period ends are reported as
+  unavailable rather than scanned or silently ignored.
+- Paths outside the root, reparse points, directories, excluded files, source
+  failures, and overflow are represented as typed monitor issues.
+- Human output summarizes each recovery and changed-file scan. `--json`
+  produces a JSON Lines stream because a monitor has many results and no single
+  terminal result document.
+- Operational JSON Lines logs stay on standard error. `--quiet` suppresses
+  those logs, but not result output or errors.
+- A requested history write failure is recorded and monitoring continues. If
+  the source ends normally, the process preserves the existing history-failure
+  and detection exit-code precedence. User cancellation returns `130`.
+- Monitor setup or filesystem failures return exit code `13`.
+
+### Security review
+
+- Filesystem notifications are hints, not a complete or ordered audit stream.
+  The operating system may coalesce or delay events. Explicit overflow recovery
+  closes known event-loss gaps, but cannot create a transactional snapshot.
+- Starting the watcher before the initial scan reduces the startup race. Events
+  raised during that scan remain queued and are processed afterward.
+- Event paths are normalized and checked to remain under the configured root.
+  The root, parent segments, and target are checked for reparse points before a
+  scan. Files can still change after validation, so enforcement must revalidate
+  identity through an opened handle immediately before quarantine.
+- Queue, debounce, directory traversal, and recovery-scan concurrency are
+  bounded. Changed-file scans are processed sequentially while the watcher
+  continues buffering events.
+- State files are excluded exactly, including SQLite `-wal` and `-shm`
+  sidecars. Placing a history database outside the watched root is still
+  recommended because exclusions intentionally make recovery scans partial.
+- Monitoring never executes, modifies, quarantines, or deletes a target.
+
+### Verification
+
+- Release build completed on .NET 10 with zero warnings and zero errors.
+- All 132 automated tests passed: 64 core, 40 infrastructure, and 28 CLI tests.
+- Engine tests cover initial recovery, same-path debounce, overflow recovery,
+  source errors, paths outside the root, unavailable and excluded entries, and
+  cancellation while idle.
+- Infrastructure tests use the real Windows watcher for created-file delivery,
+  excluded-file suppression, disposal, and bounded-queue overflow behavior.
+- CLI tests cover monitor parsing, bounded option ranges, command-specific
+  validation, and the dedicated failure exit code.
+- A release-build smoke test started the real CLI monitor against an isolated
+  temporary directory, observed the initial recovery result, created a file,
+  and received completed changed-file scan events.
+
+### Known limitations
+
+- `FileSystemWatcher` does not guarantee one event per write, stable ordering,
+  or delivery when the host or process is unavailable. A single write can emit
+  more than one scan if related events arrive outside the debounce window.
+- Changed-file scans are sequential. Sustained write rates beyond scan
+  throughput can fill the queue and trigger repeated recovery scans.
+- The monitor has no durable event journal or resume cursor across restarts.
+- Cancellation takes precedence over accumulated detection or history-failure
+  exit state because it is an explicit operator stop.
+- There is no quarantine, remediation, notification service, background Windows
+  service, or desktop interface yet.
+
+### Definition of done
+
+- [x] Monitoring depends on a replaceable event-source interface.
+- [x] Startup includes an initial recovery scan while new events are captured.
+- [x] Event bursts and memory use are bounded with configurable limits.
+- [x] Known event loss produces a visible issue and full recovery scan.
+- [x] Existing detection, history, human output, JSON output, and logs are reused.
+- [x] Root containment, reparse handling, state-file exclusions, and cancellation are tested.
+- [x] Live watcher behavior, failure semantics, and limitations are documented.
+
+### Next milestone
+
+Design safe quarantine and recovery. Quarantine must revalidate identity at the
+point of action, move content into a restricted non-executable store, retain
+tamper-resistant metadata for restoration, prevent path traversal and overwrite
+on recovery, and remain opt-in until rollback behavior is proven.
