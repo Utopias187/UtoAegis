@@ -79,6 +79,7 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
     HashReputationResult? reputation = null;
     SignatureRuleFile? signatureRuleFile = null;
     SignatureScanResult? signatureResult = null;
+    FileMetadataSnapshot? initialFileSnapshot = null;
 
     if (options.SignaturePath is not null)
     {
@@ -91,6 +92,11 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
                 options.SignaturePath,
                 signatureRuleFile.Rules.Count,
                 signatureRuleFile.DuplicateCount);
+        }
+
+        if (FileMetadataSnapshot.TryCapture(options.InputPath!, out var snapshot))
+        {
+            initialFileSnapshot = snapshot;
         }
     }
 
@@ -114,6 +120,18 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
         signatureResult = await signatureScanner.ScanAsync(
             options.InputPath!,
             cancellationToken);
+
+        if (signatureResult.IsCompleted &&
+            initialFileSnapshot is { } initialSnapshot &&
+            !initialSnapshot.Matches(options.InputPath!))
+        {
+            signatureResult = SignatureScanResult.Failure(
+                signatureScanner.EngineName,
+                SignatureScanStatus.FileChangedDuringScan,
+                hashResult.Path,
+                signatureResult.Elapsed,
+                "The file changed between detection stages; combined results were discarded.");
+        }
     }
 
     if (!options.Quiet)

@@ -119,6 +119,26 @@ public sealed class FixedByteSignatureScannerTests
     }
 
     [TestMethod]
+    [Timeout(30_000)]
+    public async Task ScanAsync_SixteenMiBAndThirtyTwoRules_Completes()
+    {
+        const int fileSize = 16 * 1024 * 1024;
+        var path = Path.Combine(_testDirectory, "performance-smoke.bin");
+        var content = new byte[fileSize];
+        Array.Fill(content, (byte)'x');
+        await File.WriteAllBytesAsync(path, content);
+        var rules = Enumerable.Range(0, 32)
+            .Select(index => CreateRule($"demo.performance.{index}", $"marker-{index:D3}"))
+            .ToArray();
+        var scanner = new FixedByteSignatureScanner(rules);
+
+        var result = await scanner.ScanAsync(path);
+
+        Assert.AreEqual(SignatureScanStatus.NoMatch, result.Status);
+        Assert.AreEqual(fileSize, result.FileSizeBytes);
+    }
+
+    [TestMethod]
     public async Task ScanAsync_MissingFile_ReturnsFileNotFound()
     {
         var scanner = new FixedByteSignatureScanner([CreateRule("demo.marker", "UTOAEGIS")]);
