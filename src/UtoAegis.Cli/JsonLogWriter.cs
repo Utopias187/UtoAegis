@@ -67,6 +67,45 @@ internal static class JsonLogWriter
         result.Status.ToString(),
         result.Elapsed.TotalMilliseconds);
 
+    public static void DirectoryScanStarted(
+        string path,
+        bool recursive,
+        int maximumConcurrency)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "directory_scan_started",
+            path,
+            recursive,
+            maximumConcurrency
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void DirectoryScanFinished(DirectoryScanResult result)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = result.Status == DirectoryScanStatus.Completed ? "information" : "warning",
+            eventName = result.IsCompleted
+                ? "directory_scan_completed"
+                : "directory_scan_failed",
+            path = result.RootPath,
+            status = result.Status.ToString(),
+            elapsedMilliseconds = result.Elapsed.TotalMilliseconds,
+            fileCount = result.Files.Count,
+            detectedFileCount = result.DetectedFileCount,
+            failedFileCount = result.FailedFileCount,
+            issueCount = result.Issues.Count
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
     private static void Write(
         string level,
         string eventName,

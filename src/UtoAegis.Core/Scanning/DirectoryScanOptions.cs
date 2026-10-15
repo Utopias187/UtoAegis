@@ -16,7 +16,8 @@ public sealed record DirectoryScanOptions
         int maximumConcurrency = DefaultMaximumConcurrency,
         int maximumFileCount = DefaultMaximumFileCount,
         int maximumDirectoryCount = DefaultMaximumDirectoryCount,
-        int maximumDepth = DefaultMaximumDepth)
+        int maximumDepth = DefaultMaximumDepth,
+        IReadOnlyCollection<string>? excludedPaths = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumConcurrency, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(
@@ -38,6 +39,12 @@ public sealed record DirectoryScanOptions
         MaximumFileCount = maximumFileCount;
         MaximumDirectoryCount = maximumDirectoryCount;
         MaximumDepth = maximumDepth;
+        ExcludedPaths = excludedPaths is null
+            ? []
+            : excludedPaths
+                .Select(Path.GetFullPath)
+                .Distinct(PathComparer)
+                .ToArray();
     }
 
     public bool Recurse { get; }
@@ -49,4 +56,10 @@ public sealed record DirectoryScanOptions
     public int MaximumDirectoryCount { get; }
 
     public int MaximumDepth { get; }
+
+    public IReadOnlyList<string> ExcludedPaths { get; }
+
+    internal static StringComparer PathComparer { get; } = OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
 }

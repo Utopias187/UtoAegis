@@ -160,6 +160,26 @@ public sealed class DirectoryScannerTests
     }
 
     [TestMethod]
+    public async Task ScanAsync_ExcludedFile_IsSkippedAndReported()
+    {
+        var scanned = await CreateFileAsync("scanned.txt");
+        var excluded = await CreateFileAsync("rules.jsonl");
+        var fileScanner = new RecordingFileScanner();
+        var scanner = new DirectoryScanner(
+            fileScanner,
+            new DirectoryScanOptions(excludedPaths: [excluded]));
+
+        var result = await scanner.ScanAsync(_testDirectory);
+
+        Assert.AreEqual(DirectoryScanStatus.Partial, result.Status);
+        Assert.HasCount(1, result.Files);
+        Assert.AreEqual(scanned, result.Files[0].Path);
+        Assert.HasCount(1, result.Issues);
+        Assert.AreEqual(excluded, result.Issues[0].Path);
+        Assert.AreEqual(DirectoryScanIssueKind.Excluded, result.Issues[0].Kind);
+    }
+
+    [TestMethod]
     public async Task ScanAsync_ReparsePoint_IsSkippedAndReported()
     {
         var target = Path.Combine(_testDirectory, "target");

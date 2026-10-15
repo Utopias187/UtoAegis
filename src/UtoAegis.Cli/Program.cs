@@ -32,6 +32,7 @@ try
     return options.Command switch
     {
         CliCommand.Scan => await RunScanAsync(options, cancellation.Token),
+        CliCommand.ScanDirectory => await RunDirectoryScanAsync(options, cancellation.Token),
         CliCommand.ImportHashes => await RunImportAsync(options, cancellation.Token),
         _ => ExitCodes.UsageError
     };
@@ -54,17 +55,19 @@ catch (SignatureRuleFileException exception)
 catch (ReputationStoreException exception)
 {
     Console.Error.WriteLine($"Reputation database error: {exception.Message}");
-    return ExitCodes.ImportFailed;
+    return options.Command == CliCommand.ImportHashes
+        ? ExitCodes.ImportFailed
+        : ExitCodes.ReputationLookupFailed;
 }
 catch (UnauthorizedAccessException)
 {
     Console.Error.WriteLine("The operation was denied by the file system.");
-    return ExitCodes.ImportFailed;
+    return ExitCodeResolver.ForOperationFailure(options.Command);
 }
 catch (IOException)
 {
     Console.Error.WriteLine("The operation failed because a file could not be read or written.");
-    return ExitCodes.ImportFailed;
+    return ExitCodeResolver.ForOperationFailure(options.Command);
 }
 
 static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancellationToken)
@@ -74,98 +77,103 @@ static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancel
         JsonLogWriter.ScanStarted(options.InputPath!);
     }
 
-    var hashScanner = new Sha256FileHashScanner();
-    FileHashScanResult hashResult;
-    HashReputationResult? reputation = null;
-    SignatureRuleFile? signatureRuleFile = null;
-    SignatureScanResult? signatureResult = null;
-    FileMetadataSnapshot? initialFileSnapshot = null;
+    var scanner = await CreateFileScannerAsync(options, cancellationToken);
+    var result = await scanner.ScanAsync(options.InputPath!, cancellationToken);
 
+    if (!options.Quiet)
+    {
+        JsonLogWriter.ScanFinished(result.FileHash, result.Reputation);
+        if (result.Signatures is not null)
+        {
+            JsonLogWriter.SignatureScanFinished(result.Signatures);
+        }
+    }
+
+    WriteScanResult(options.Json, result);
+    return ExitCodeResolver.ForFile(result);
+}
+
+static async Task<int> RunDirectoryScanAsync(
+    CliOptions options,
+    CancellationToken cancellationToken)
+{
+    if (!options.Quiet)
+    {
+        JsonLogWriter.DirectoryScanStarted(
+            options.InputPath!,
+            options.Recursive,
+            options.MaximumConcurrency);
+    }
+
+    var fileScanner = await CreateFileScannerAsync(options, cancellationToken);
+    var directoryScanner = new DirectoryScanner(
+        fileScanner,
+        new DirectoryScanOptions(
+            recurse: options.Recursive,
+            maximumConcurrency: options.MaximumConcurrency,
+            excludedPaths: DirectoryScanExclusions(options)));
+    var result = await directoryScanner.ScanAsync(options.InputPath!, cancellationToken);
+
+    if (!options.Quiet)
+    {
+        JsonLogWriter.DirectoryScanFinished(result);
+    }
+
+    WriteDirectoryScanResult(options.Json, options, result);
+    return ExitCodeResolver.ForDirectory(result);
+}
+
+static async ValueTask<IFileScanner> CreateFileScannerAsync(
+    CliOptions options,
+    CancellationToken cancellationToken)
+{
+    IHashReputationStore? reputationStore = null;
+    if (options.DatabasePath is not null)
+    {
+        var store = new SqliteHashReputationStore(options.DatabasePath);
+        await store.InitializeAsync(cancellationToken);
+        reputationStore = store;
+    }
+
+    ISignatureScanner? signatureScanner = null;
     if (options.SignaturePath is not null)
     {
-        signatureRuleFile = await JsonLinesSignatureRuleReader.ReadAsync(
+        var ruleFile = await JsonLinesSignatureRuleReader.ReadAsync(
             options.SignaturePath,
             cancellationToken);
+        signatureScanner = new FixedByteSignatureScanner(ruleFile.Rules);
         if (!options.Quiet)
         {
             JsonLogWriter.SignatureRulesLoaded(
                 options.SignaturePath,
-                signatureRuleFile.Rules.Count,
-                signatureRuleFile.DuplicateCount);
-        }
-
-        if (FileMetadataSnapshot.TryCapture(options.InputPath!, out var snapshot))
-        {
-            initialFileSnapshot = snapshot;
+                ruleFile.Rules.Count,
+                ruleFile.DuplicateCount);
         }
     }
 
-    if (options.DatabasePath is null)
-    {
-        hashResult = await hashScanner.ScanAsync(options.InputPath!, cancellationToken);
-    }
-    else
-    {
-        var store = new SqliteHashReputationStore(options.DatabasePath);
-        await store.InitializeAsync(cancellationToken);
-        var scanner = new FileReputationScanner(hashScanner, store);
-        var result = await scanner.ScanAsync(options.InputPath!, cancellationToken);
-        hashResult = result.FileHash;
-        reputation = result.Reputation;
-    }
+    return new CompositeFileScanner(
+        new Sha256FileHashScanner(),
+        reputationStore,
+        signatureScanner);
+}
 
-    if (hashResult.IsSuccess && signatureRuleFile is not null)
+static IReadOnlyCollection<string> DirectoryScanExclusions(CliOptions options)
+{
+    var paths = new List<string>();
+    if (options.SignaturePath is not null)
     {
-        var signatureScanner = new FixedByteSignatureScanner(signatureRuleFile.Rules);
-        signatureResult = await signatureScanner.ScanAsync(
-            options.InputPath!,
-            cancellationToken);
-
-        if (signatureResult.IsCompleted &&
-            initialFileSnapshot is { } initialSnapshot &&
-            !initialSnapshot.Matches(options.InputPath!))
-        {
-            signatureResult = SignatureScanResult.Failure(
-                signatureScanner.EngineName,
-                SignatureScanStatus.FileChangedDuringScan,
-                hashResult.Path,
-                signatureResult.Elapsed,
-                "The file changed between detection stages; combined results were discarded.");
-        }
+        paths.Add(Path.GetFullPath(options.SignaturePath));
     }
 
-    if (!options.Quiet)
+    if (options.DatabasePath is not null)
     {
-        JsonLogWriter.ScanFinished(hashResult, reputation);
-        if (signatureResult is not null)
-        {
-            JsonLogWriter.SignatureScanFinished(signatureResult);
-        }
+        var databasePath = Path.GetFullPath(options.DatabasePath);
+        paths.Add(databasePath);
+        paths.Add(databasePath + "-shm");
+        paths.Add(databasePath + "-wal");
     }
 
-    WriteScanResult(options.Json, hashResult, reputation, signatureResult);
-
-    if (!hashResult.IsSuccess)
-    {
-        return ExitCodes.ScanFailed;
-    }
-
-    if (signatureResult is { IsCompleted: false })
-    {
-        return ExitCodes.SignatureScanFailed;
-    }
-
-    if (reputation?.Status == HashReputationStatus.Malicious ||
-        signatureResult?.Status == SignatureScanStatus.Detected)
-    {
-        return ExitCodes.ThreatDetected;
-    }
-
-    return reputation?.Status switch
-    {
-        HashReputationStatus.LookupFailed => ExitCodes.ReputationLookupFailed,
-        _ => ExitCodes.Success
-    };
+    return paths;
 }
 
 static async Task<int> RunImportAsync(CliOptions options, CancellationToken cancellationToken)
@@ -207,100 +215,204 @@ static async Task<int> RunImportAsync(CliOptions options, CancellationToken canc
     return ExitCodes.Success;
 }
 
-static void WriteScanResult(
+static void WriteScanResult(bool json, FileScanResult result)
+{
+    if (json)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            CreateFileScanPayload(result),
+            CliJson.ResultOptions));
+        return;
+    }
+
+    WriteHumanFileDetails(result);
+}
+
+static void WriteDirectoryScanResult(
     bool json,
-    FileHashScanResult hashResult,
-    HashReputationResult? reputation,
-    SignatureScanResult? signatureResult)
+    CliOptions options,
+    DirectoryScanResult result)
 {
     if (json)
     {
         Console.WriteLine(JsonSerializer.Serialize(
             new
             {
-                status = hashResult.Status.ToString(),
-                path = hashResult.Path,
-                algorithm = hashResult.IsSuccess ? "SHA-256" : null,
-                sha256 = hashResult.Sha256,
-                fileSizeBytes = hashResult.FileSizeBytes,
-                elapsedMilliseconds = hashResult.Elapsed.TotalMilliseconds,
-                error = hashResult.ErrorMessage,
-                reputation = reputation is null
-                    ? null
-                    : new
-                    {
-                        status = reputation.Status.ToString(),
-                        classification = reputation.Indicator?.Classification.ToString(),
-                        malwareFamily = reputation.Indicator?.MalwareFamily,
-                        source = reputation.Indicator?.Source,
-                        firstSeenUtc = reputation.Indicator?.FirstSeenUtc,
-                        recordUpdatedUtc = reputation.RecordUpdatedUtc,
-                        error = reputation.ErrorMessage
-                    },
-                signatures = signatureResult is null
-                    ? null
-                    : new
-                    {
-                        status = signatureResult.Status.ToString(),
-                        engine = signatureResult.EngineName,
-                        fileSizeBytes = signatureResult.FileSizeBytes,
-                        elapsedMilliseconds = signatureResult.Elapsed.TotalMilliseconds,
-                        error = signatureResult.ErrorMessage,
-                        matches = signatureResult.Matches.Select(match => new
-                        {
-                            ruleId = match.RuleId,
-                            ruleName = match.RuleName,
-                            source = match.Source,
-                            offset = match.Offset,
-                            patternLengthBytes = match.PatternLengthBytes
-                        })
-                    }
+                status = result.Status.ToString(),
+                rootPath = result.RootPath,
+                recursive = options.Recursive,
+                maximumConcurrency = options.MaximumConcurrency,
+                elapsedMilliseconds = result.Elapsed.TotalMilliseconds,
+                error = result.ErrorMessage,
+                summary = new
+                {
+                    fileCount = result.Files.Count,
+                    detectedFileCount = result.DetectedFileCount,
+                    failedFileCount = result.FailedFileCount,
+                    issueCount = result.Issues.Count
+                },
+                issues = result.Issues.Select(issue => new
+                {
+                    path = issue.Path,
+                    kind = issue.Kind.ToString(),
+                    message = issue.Message
+                }),
+                files = result.Files.Select(file => CreateFileScanPayload(file.Result))
             },
             CliJson.ResultOptions));
         return;
     }
 
-    if (!hashResult.IsSuccess)
+    if (!result.IsCompleted)
     {
-        Console.Error.WriteLine($"Scan failed ({hashResult.Status}): {hashResult.ErrorMessage}");
+        Console.Error.WriteLine(
+            $"Directory scan failed ({result.Status}): {result.ErrorMessage}");
+        WriteDirectoryIssues(result.Issues);
         return;
     }
 
-    Console.WriteLine($"{hashResult.Sha256}  {hashResult.Path}");
+    Console.WriteLine(
+        $"Directory scan {result.Status}: {result.Files.Count} file(s), " +
+        $"{result.DetectedFileCount} detection(s), {result.FailedFileCount} file failure(s), " +
+        $"{result.Issues.Count} traversal issue(s).");
 
-    if (reputation?.Status == HashReputationStatus.Malicious)
+    foreach (var file in result.Files)
     {
-        var family = reputation.Indicator!.MalwareFamily ?? "unspecified family";
-        Console.WriteLine(
-            $"Reputation: MALICIOUS ({family}; source: {reputation.Indicator.Source})");
+        var label = file.Result.IsDetected
+            ? "DETECTED"
+            : file.Result.IsCompleted
+                ? "NO DETECTION"
+                : "FAILED";
+        Console.WriteLine($"[{label}] {file.Path}");
+        if (file.Result.IsDetected || !file.Result.IsCompleted)
+        {
+            WriteHumanDetectionAndFailures(file.Result, "  ");
+        }
     }
-    else if (reputation?.Status == HashReputationStatus.Unknown)
+
+    WriteDirectoryIssues(result.Issues);
+}
+
+static object CreateFileScanPayload(FileScanResult result)
+{
+    var hash = result.FileHash;
+    var reputation = result.Reputation;
+    var signatures = result.Signatures;
+    return new
+    {
+        status = hash.Status.ToString(),
+        path = hash.Path,
+        algorithm = hash.IsSuccess ? "SHA-256" : null,
+        sha256 = hash.Sha256,
+        fileSizeBytes = hash.FileSizeBytes,
+        elapsedMilliseconds = hash.Elapsed.TotalMilliseconds,
+        error = hash.ErrorMessage,
+        detected = result.IsDetected,
+        completed = result.IsCompleted,
+        reputation = reputation is null
+            ? null
+            : new
+            {
+                status = reputation.Status.ToString(),
+                classification = reputation.Indicator?.Classification.ToString(),
+                malwareFamily = reputation.Indicator?.MalwareFamily,
+                source = reputation.Indicator?.Source,
+                firstSeenUtc = reputation.Indicator?.FirstSeenUtc,
+                recordUpdatedUtc = reputation.RecordUpdatedUtc,
+                error = reputation.ErrorMessage
+            },
+        signatures = signatures is null
+            ? null
+            : new
+            {
+                status = signatures.Status.ToString(),
+                engine = signatures.EngineName,
+                fileSizeBytes = signatures.FileSizeBytes,
+                elapsedMilliseconds = signatures.Elapsed.TotalMilliseconds,
+                error = signatures.ErrorMessage,
+                matches = signatures.Matches.Select(match => new
+                {
+                    ruleId = match.RuleId,
+                    ruleName = match.RuleName,
+                    source = match.Source,
+                    offset = match.Offset,
+                    patternLengthBytes = match.PatternLengthBytes
+                })
+            }
+    };
+}
+
+static void WriteHumanFileDetails(FileScanResult result)
+{
+    if (!result.FileHash.IsSuccess)
+    {
+        Console.Error.WriteLine(
+            $"Scan failed ({result.FileHash.Status}): {result.FileHash.ErrorMessage}");
+        return;
+    }
+
+    Console.WriteLine($"{result.FileHash.Sha256}  {result.FileHash.Path}");
+    WriteHumanDetectionAndFailures(result, string.Empty);
+
+    if (result.Reputation?.Status == HashReputationStatus.Unknown)
     {
         Console.WriteLine("Reputation: UNKNOWN (not present in the configured database)");
     }
-    else if (reputation?.Status == HashReputationStatus.LookupFailed)
-    {
-        Console.Error.WriteLine($"Reputation lookup failed: {reputation.ErrorMessage}");
-    }
 
-    if (signatureResult?.Status == SignatureScanStatus.Detected)
-    {
-        Console.WriteLine($"Signatures: DETECTED ({signatureResult.Matches.Count} rule match(es))");
-        foreach (var match in signatureResult.Matches)
-        {
-            Console.WriteLine(
-                $"  {match.RuleId} at byte {match.Offset} " +
-                $"({match.RuleName}; source: {match.Source})");
-        }
-    }
-    else if (signatureResult?.Status == SignatureScanStatus.NoMatch)
+    if (result.Signatures?.Status == SignatureScanStatus.NoMatch)
     {
         Console.WriteLine("Signatures: NO MATCH (no configured exact-byte rule matched)");
     }
-    else if (signatureResult is not null)
+}
+
+static void WriteHumanDetectionAndFailures(FileScanResult result, string indent)
+{
+    if (!result.FileHash.IsSuccess)
     {
         Console.Error.WriteLine(
-            $"Signature scan failed ({signatureResult.Status}): {signatureResult.ErrorMessage}");
+            $"{indent}Hash scan failed ({result.FileHash.Status}): " +
+            result.FileHash.ErrorMessage);
+        return;
+    }
+
+    if (result.Reputation?.Status == HashReputationStatus.Malicious)
+    {
+        var family = result.Reputation.Indicator!.MalwareFamily ?? "unspecified family";
+        Console.WriteLine(
+            $"{indent}Reputation: MALICIOUS " +
+            $"({family}; source: {result.Reputation.Indicator.Source})");
+    }
+    else if (result.Reputation?.Status == HashReputationStatus.LookupFailed)
+    {
+        Console.Error.WriteLine(
+            $"{indent}Reputation lookup failed: {result.Reputation.ErrorMessage}");
+    }
+
+    if (result.Signatures?.Status == SignatureScanStatus.Detected)
+    {
+        Console.WriteLine(
+            $"{indent}Signatures: DETECTED " +
+            $"({result.Signatures.Matches.Count} rule match(es))");
+        foreach (var match in result.Signatures.Matches)
+        {
+            Console.WriteLine(
+                $"{indent}  {match.RuleId} at byte {match.Offset} " +
+                $"({match.RuleName}; source: {match.Source})");
+        }
+    }
+    else if (result.Signatures is { IsCompleted: false })
+    {
+        Console.Error.WriteLine(
+            $"{indent}Signature scan failed ({result.Signatures.Status}): " +
+            result.Signatures.ErrorMessage);
+    }
+}
+
+static void WriteDirectoryIssues(IReadOnlyList<DirectoryScanIssue> issues)
+{
+    foreach (var issue in issues)
+    {
+        Console.Error.WriteLine($"[{issue.Kind}] {issue.Path}: {issue.Message}");
     }
 }
 
@@ -308,23 +420,27 @@ static void PrintUsage()
 {
     Console.WriteLine(
         """
-        UtoAegis file, hash-reputation, and signature scanner
+        UtoAegis file, directory, hash-reputation, and signature scanner
 
         Usage:
           utoaegis [scan] [--database <path>] [--signatures <path>] [--json] [--quiet] [--] <file>
+          utoaegis scan-directory [--recursive] [--max-concurrency <1-32>] [--database <path>] [--signatures <path>] [--json] [--quiet] [--] <directory>
           utoaegis import-hashes --database <path> [--json] [--quiet] <indicators.jsonl>
 
         Commands:
-          scan           Calculate SHA-256 and optionally run reputation and signature checks.
-          import-hashes  Validate and transactionally import JSON Lines indicators.
+          scan            Calculate SHA-256 and optionally run reputation and signature checks.
+          scan-directory  Scan each regular file in a directory without following reparse points.
+          import-hashes   Validate and transactionally import JSON Lines indicators.
 
         Options:
-          --database     SQLite reputation database path.
-          --signatures   JSON Lines exact-byte signature rule file.
-          --json         Emit the result as JSON.
-          --quiet        Suppress structured operational logs on stderr.
-          --             Treat all following arguments as positional values.
-          -h, --help     Show this help text.
+          --recursive        Include nested directories; disabled by default.
+          --max-concurrency  Concurrent file scans for scan-directory; default 4, maximum 32.
+          --database         SQLite reputation database path.
+          --signatures       JSON Lines exact-byte signature rule file.
+          --json             Emit the result as JSON.
+          --quiet            Suppress structured operational logs on stderr.
+          --                 Treat all following arguments as positional values.
+          -h, --help         Show this help text.
 
         JSON Lines indicator fields:
           sha256, source, optional classification (Malware), malwareFamily,

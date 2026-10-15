@@ -1,8 +1,12 @@
+using System.Globalization;
+using UtoAegis.Core.Scanning;
+
 namespace UtoAegis.Cli;
 
 internal enum CliCommand
 {
     Scan,
+    ScanDirectory,
     ImportHashes
 }
 
@@ -11,6 +15,8 @@ internal sealed record CliOptions(
     string? InputPath,
     string? DatabasePath,
     string? SignaturePath,
+    bool Recursive,
+    int MaximumConcurrency,
     bool Json,
     bool Quiet,
     bool ShowHelp)
@@ -29,11 +35,20 @@ internal sealed record CliOptions(
             command = CliCommand.ImportHashes;
             index++;
         }
+        else if (args.Length > 0 && args[0] == "scan-directory")
+        {
+            command = CliCommand.ScanDirectory;
+            index++;
+        }
 
         var json = false;
         var quiet = false;
         var showHelp = false;
+        var recursive = false;
+        var recursiveSpecified = false;
         var parseOptions = true;
+        var maximumConcurrency = DirectoryScanOptions.DefaultMaximumConcurrency;
+        var maximumConcurrencySpecified = false;
         string? databasePath = null;
         string? signaturePath = null;
         string? inputPath = null;
@@ -61,6 +76,47 @@ internal sealed record CliOptions(
                 }
 
                 signaturePath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--recursive")
+            {
+                if (recursiveSpecified)
+                {
+                    return Fail("--recursive may only be supplied once.", out options, out error);
+                }
+
+                recursive = true;
+                recursiveSpecified = true;
+                continue;
+            }
+
+            if (parseOptions && argument == "--max-concurrency")
+            {
+                if (index >= args.Length ||
+                    !int.TryParse(
+                        args[index],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out maximumConcurrency) ||
+                    maximumConcurrency is < 1 or > DirectoryScanOptions.MaximumAllowedConcurrency)
+                {
+                    return Fail(
+                        $"--max-concurrency requires an integer from 1 to {DirectoryScanOptions.MaximumAllowedConcurrency}.",
+                        out options,
+                        out error);
+                }
+
+                if (maximumConcurrencySpecified)
+                {
+                    return Fail(
+                        "--max-concurrency may only be supplied once.",
+                        out options,
+                        out error);
+                }
+
+                index++;
+                maximumConcurrencySpecified = true;
                 continue;
             }
 
@@ -113,7 +169,12 @@ internal sealed record CliOptions(
 
         if (!showHelp && inputPath is null)
         {
-            var inputName = command == CliCommand.Scan ? "file" : "JSON Lines import file";
+            var inputName = command switch
+            {
+                CliCommand.Scan => "file",
+                CliCommand.ScanDirectory => "directory",
+                _ => "JSON Lines import file"
+            };
             return Fail($"A {inputName} path is required.", out options, out error);
         }
 
@@ -124,7 +185,23 @@ internal sealed record CliOptions(
 
         if (!showHelp && command == CliCommand.ImportHashes && signaturePath is not null)
         {
-            return Fail("--signatures is only valid with the scan command.", out options, out error);
+            return Fail(
+                "--signatures is only valid with scan or scan-directory.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command != CliCommand.ScanDirectory && recursiveSpecified)
+        {
+            return Fail("--recursive is only valid with scan-directory.", out options, out error);
+        }
+
+        if (!showHelp && command != CliCommand.ScanDirectory && maximumConcurrencySpecified)
+        {
+            return Fail(
+                "--max-concurrency is only valid with scan-directory.",
+                out options,
+                out error);
         }
 
         options = new CliOptions(
@@ -132,6 +209,8 @@ internal sealed record CliOptions(
             inputPath,
             databasePath,
             signaturePath,
+            recursive,
+            maximumConcurrency,
             json,
             quiet,
             showHelp);

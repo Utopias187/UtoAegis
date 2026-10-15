@@ -52,7 +52,7 @@ public sealed class CliOptionsTests
 
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
-        Assert.AreEqual("--signatures is only valid with the scan command.", error);
+        Assert.AreEqual("--signatures is only valid with scan or scan-directory.", error);
     }
 
     [TestMethod]
@@ -67,5 +67,105 @@ public sealed class CliOptionsTests
         Assert.IsNull(error);
         Assert.IsNotNull(options);
         Assert.AreEqual("--sample.bin", options.InputPath);
+    }
+
+    [TestMethod]
+    public void TryParse_DirectoryOptions_ReturnExpectedValues()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "scan-directory",
+                "--recursive",
+                "--max-concurrency",
+                "8",
+                "--signatures",
+                "rules.jsonl",
+                "samples"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.ScanDirectory, options.Command);
+        Assert.AreEqual("samples", options.InputPath);
+        Assert.AreEqual("rules.jsonl", options.SignaturePath);
+        Assert.IsTrue(options.Recursive);
+        Assert.AreEqual(8, options.MaximumConcurrency);
+    }
+
+    [TestMethod]
+    public void TryParse_DirectoryDefaults_AreBounded()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan-directory", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.IsFalse(options.Recursive);
+        Assert.AreEqual(4, options.MaximumConcurrency);
+    }
+
+    [TestMethod]
+    public void TryParse_RecursiveWithFileScan_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan", "--recursive", "sample.bin"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--recursive is only valid with scan-directory.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_ConcurrencyWithImport_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "import-hashes",
+                "--database",
+                "reputation.db",
+                "--max-concurrency",
+                "2",
+                "indicators.jsonl"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--max-concurrency is only valid with scan-directory.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_ConcurrencyOutsideAllowedRange_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan-directory", "--max-concurrency", "33", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--max-concurrency requires an integer from 1 to 32.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_DuplicateRecursiveOption_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan-directory", "--recursive", "--recursive", "samples"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("--recursive may only be supplied once.", error);
     }
 }

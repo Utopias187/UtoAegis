@@ -100,6 +100,45 @@ public sealed class CompositeFileScannerTests
         Assert.AreSame(signatureResult, result.Signatures);
     }
 
+    [TestMethod]
+    public async Task ScanAsync_FileChangedBetweenStages_DiscardsSignatureResult()
+    {
+        var testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "UtoAegis.Tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(testDirectory);
+        var path = Path.Combine(testDirectory, "changing.bin");
+        await File.WriteAllTextAsync(path, "original content");
+        try
+        {
+            var signatureResult = SignatureScanResult.Completed(
+                "stub",
+                path,
+                [],
+                new FileInfo(path).Length,
+                TimeSpan.Zero);
+            var scanner = new CompositeFileScanner(
+                new Sha256FileHashScanner(),
+                signatureScanner: new StubSignatureScanner(
+                    signatureResult,
+                    scannedPath => File.AppendAllText(scannedPath, " changed")));
+
+            var result = await scanner.ScanAsync(path);
+
+            Assert.IsFalse(result.IsCompleted);
+            Assert.IsNotNull(result.Signatures);
+            Assert.AreEqual(
+                SignatureScanStatus.FileChangedDuringScan,
+                result.Signatures.Status);
+            Assert.IsEmpty(result.Signatures.Matches);
+        }
+        finally
+        {
+            Directory.Delete(testDirectory, recursive: true);
+        }
+    }
+
     private static FileHashScanResult SuccessfulHash(string path) =>
         FileHashScanResult.Success(path, Hash, 12, TimeSpan.Zero);
 
@@ -125,7 +164,9 @@ public sealed class CompositeFileScannerTests
             ValueTask.FromResult(result);
     }
 
-    private sealed class StubSignatureScanner(SignatureScanResult result) : ISignatureScanner
+    private sealed class StubSignatureScanner(
+        SignatureScanResult result,
+        Action<string>? beforeResult = null) : ISignatureScanner
     {
         public int ScanCount { get; private set; }
 
@@ -136,6 +177,7 @@ public sealed class CompositeFileScannerTests
             CancellationToken cancellationToken = default)
         {
             ScanCount++;
+            beforeResult?.Invoke(path);
             return ValueTask.FromResult(result);
         }
     }

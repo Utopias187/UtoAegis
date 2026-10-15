@@ -7,6 +7,7 @@ public sealed class DirectoryScanner : IDirectoryScanner
 {
     private readonly IFileScanner _fileScanner;
     private readonly DirectoryScanOptions _options;
+    private readonly HashSet<string> _excludedPaths;
 
     public DirectoryScanner(
         IFileScanner fileScanner,
@@ -15,6 +16,9 @@ public sealed class DirectoryScanner : IDirectoryScanner
         ArgumentNullException.ThrowIfNull(fileScanner);
         _fileScanner = fileScanner;
         _options = options ?? new DirectoryScanOptions();
+        _excludedPaths = new HashSet<string>(
+            _options.ExcludedPaths,
+            DirectoryScanOptions.PathComparer);
     }
 
     public async ValueTask<DirectoryScanResult> ScanAsync(
@@ -192,6 +196,15 @@ public sealed class DirectoryScanner : IDirectoryScanner
             foreach (var entry in entries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                if (_excludedPaths.Contains(entry))
+                {
+                    issues.Add(new DirectoryScanIssue(
+                        entry,
+                        DirectoryScanIssueKind.Excluded,
+                        "The configured exclusion was not scanned."));
+                    continue;
+                }
 
                 FileAttributes attributes;
                 try
