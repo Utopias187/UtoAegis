@@ -11,6 +11,7 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
 {
     public const int CurrentSchemaVersion = 1;
     public const int MaximumListLimit = 200;
+    public const int ApplicationId = 1_431_583_560;
 
     private readonly string _databasePath;
 
@@ -44,11 +45,28 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
                 .ConfigureAwait(false);
             var version = await ReadSchemaVersionAsync(connection, transaction, cancellationToken)
                 .ConfigureAwait(false);
+            var applicationId = await ReadApplicationIdAsync(
+                    connection,
+                    transaction,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
             if (version > CurrentSchemaVersion)
             {
                 throw new ScanHistoryStoreException(
                     $"History schema version {version} is newer than supported version {CurrentSchemaVersion}.");
+            }
+
+            if (version > 0 && applicationId != ApplicationId)
+            {
+                throw new ScanHistoryStoreException(
+                    "The database is not a UtoAegis scan history database.");
+            }
+
+            if (version == 0 && applicationId != 0)
+            {
+                throw new ScanHistoryStoreException(
+                    "The unversioned database belongs to another application.");
             }
 
             if (version == 0)
@@ -192,6 +210,15 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
                 .ConfigureAwait(false);
             var issues = await ReadIssuesAsync(connection, transaction, id, cancellationToken)
                 .ConfigureAwait(false);
+
+            if (files.Count != header.FileCount ||
+                files.Count(file => file.Detected) != header.DetectedFileCount ||
+                files.Count(file => !file.Completed) != header.FailedFileCount ||
+                issues.Count != header.IssueCount)
+            {
+                throw new ScanHistoryStoreException(
+                    "The history database contains an internally inconsistent scan record.");
+            }
 
             return ScanHistoryRecord.Restore(
                 id,
@@ -494,7 +521,8 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
         command.CommandText =
             """
             SELECT target_kind, target_path, recursive, started_utc, completed_utc,
-                   outcome, error_message
+                   outcome, file_count, detected_file_count, failed_file_count,
+                   issue_count, error_message
             FROM scan_history
             WHERE id = $id
             LIMIT 1;
@@ -515,7 +543,11 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
             ParseTimestamp(reader.GetString(3)),
             ParseTimestamp(reader.GetString(4)),
             ReadEnum<ScanHistoryOutcome>(reader.GetString(5), "outcome"),
-            reader.IsDBNull(6) ? null : reader.GetString(6));
+            reader.GetInt32(6),
+            reader.GetInt32(7),
+            reader.GetInt32(8),
+            reader.GetInt32(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10));
     }
 
     private static async ValueTask<IReadOnlyList<ScanHistoryFile>> ReadFilesAsync(
@@ -531,7 +563,8 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
             SELECT ordinal, path, hash_status, sha256, file_size_bytes, detected, completed,
                    reputation_status, reputation_classification, reputation_malware_family,
                    reputation_source, reputation_first_seen_utc, signature_status,
-                   signature_engine, hash_error, reputation_error, signature_error
+                   signature_engine, signature_match_count, hash_error,
+                   reputation_error, signature_error
             FROM scan_history_files
             WHERE scan_id = $scan_id
             ORDER BY ordinal;
@@ -560,9 +593,10 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
                     reader.IsDBNull(11) ? null : ParseTimestamp(reader.GetString(11)),
                     ReadNullableEnum<SignatureScanStatus>(reader, 12, "signature status"),
                     reader.IsDBNull(13) ? null : reader.GetString(13),
-                    reader.IsDBNull(14) ? null : reader.GetString(14),
+                    reader.GetInt32(14),
                     reader.IsDBNull(15) ? null : reader.GetString(15),
-                    reader.IsDBNull(16) ? null : reader.GetString(16)));
+                    reader.IsDBNull(16) ? null : reader.GetString(16),
+                    reader.IsDBNull(17) ? null : reader.GetString(17)));
             }
         }
 
@@ -576,6 +610,12 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
         foreach (var row in rows)
         {
             matchesByFile.TryGetValue(row.Ordinal, out var matches);
+            if ((matches?.Count ?? 0) != row.SignatureMatchCount)
+            {
+                throw new ScanHistoryStoreException(
+                    "The history database contains an inconsistent signature match count.");
+            }
+
             files.Add(new ScanHistoryFile(
                 row.Path,
                 row.HashStatus,
@@ -723,6 +763,18 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
         return Convert.ToInt64(value, CultureInfo.InvariantCulture);
     }
 
+    private static async ValueTask<long> ReadApplicationIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "PRAGMA application_id;";
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+    }
+
     private static async ValueTask ApplyVersionOneAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -801,6 +853,7 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
                 FOREIGN KEY(scan_id) REFERENCES scan_history(id) ON DELETE CASCADE
             ) STRICT;
 
+            PRAGMA application_id = 1431583560;
             PRAGMA user_version = 1;
             """;
 
@@ -869,6 +922,10 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
         DateTimeOffset StartedUtc,
         DateTimeOffset CompletedUtc,
         ScanHistoryOutcome Outcome,
+        int FileCount,
+        int DetectedFileCount,
+        int FailedFileCount,
+        int IssueCount,
         string? ErrorMessage);
 
     private sealed record FileRow(
@@ -886,6 +943,7 @@ public sealed class SqliteScanHistoryStore : IScanHistoryStore
         DateTimeOffset? ReputationFirstSeenUtc,
         SignatureScanStatus? SignatureStatus,
         string? SignatureEngine,
+        int SignatureMatchCount,
         string? HashError,
         string? ReputationError,
         string? SignatureError);

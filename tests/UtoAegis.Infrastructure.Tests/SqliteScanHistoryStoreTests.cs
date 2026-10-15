@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using UtoAegis.Core.History;
 using UtoAegis.Core.Reputation;
@@ -48,6 +49,9 @@ public sealed class SqliteScanHistoryStoreTests
         command.CommandText = "PRAGMA user_version;";
         var version = (long)(await command.ExecuteScalarAsync())!;
         Assert.AreEqual(SqliteScanHistoryStore.CurrentSchemaVersion, version);
+        command.CommandText = "PRAGMA application_id;";
+        var applicationId = (long)(await command.ExecuteScalarAsync())!;
+        Assert.AreEqual(SqliteScanHistoryStore.ApplicationId, applicationId);
     }
 
     [TestMethod]
@@ -155,6 +159,43 @@ public sealed class SqliteScanHistoryStoreTests
     }
 
     [TestMethod]
+    public async Task AppendAsync_DuplicateId_LeavesOriginalRecordUnchanged()
+    {
+        var store = new SqliteScanHistoryStore(_databasePath);
+        await store.InitializeAsync();
+        var record = CreateRecord(Guid.NewGuid(), ParseTime("2026-10-15T12:00:00Z"));
+        await store.AppendAsync(record);
+
+        await Assert.ThrowsExactlyAsync<ScanHistoryStoreException>(
+            async () => await store.AppendAsync(record));
+
+        var summaries = await store.ListAsync(10);
+        Assert.HasCount(1, summaries);
+        Assert.AreEqual(record.Id, summaries[0].Id);
+    }
+
+    [TestMethod]
+    public async Task GetAsync_InconsistentStoredCount_RejectsRecord()
+    {
+        var store = new SqliteScanHistoryStore(_databasePath);
+        await store.InitializeAsync();
+        var record = CreateRecord(Guid.NewGuid(), ParseTime("2026-10-15T12:00:00Z"));
+        await store.AppendAsync(record);
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE scan_history SET file_count = 2;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var exception = await Assert.ThrowsExactlyAsync<ScanHistoryStoreException>(
+            async () => await store.GetAsync(record.Id));
+
+        StringAssert.Contains(exception.Message, "internally inconsistent");
+    }
+
+    [TestMethod]
     public async Task InitializeAsync_NewerSchema_RejectsDatabase()
     {
         Directory.CreateDirectory(_testDirectory);
@@ -174,12 +215,80 @@ public sealed class SqliteScanHistoryStoreTests
     }
 
     [TestMethod]
+    public async Task InitializeAsync_UnrelatedVersionOneDatabase_IsRejected()
+    {
+        Directory.CreateDirectory(_testDirectory);
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 1;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var store = new SqliteScanHistoryStore(_databasePath);
+
+        var exception = await Assert.ThrowsExactlyAsync<ScanHistoryStoreException>(
+            async () => await store.InitializeAsync());
+        StringAssert.Contains(exception.Message, "not a UtoAegis scan history database");
+    }
+
+    [TestMethod]
     public async Task ListAsync_InvalidLimit_Throws()
     {
         var store = new SqliteScanHistoryStore(_databasePath);
 
         await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(
             async () => await store.ListAsync(SqliteScanHistoryStore.MaximumListLimit + 1));
+    }
+
+    [TestMethod]
+    [Timeout(30_000)]
+    public async Task AppendAndGetAsync_TwoThousandFiles_CompletesWithinSmokeLimit()
+    {
+        var store = new SqliteScanHistoryStore(_databasePath);
+        await store.InitializeAsync();
+        var startedUtc = ParseTime("2026-10-15T12:00:00Z");
+        var files = Enumerable.Range(0, 2_000)
+            .Select(index => new ScanHistoryFile(
+                $"file-{index:D4}.bin",
+                FileHashScanStatus.Success,
+                index.ToString("x64", CultureInfo.InvariantCulture),
+                index,
+                Detected: false,
+                Completed: true,
+                ReputationStatus: null,
+                ReputationClassification: null,
+                ReputationMalwareFamily: null,
+                ReputationSource: null,
+                ReputationFirstSeenUtc: null,
+                SignatureStatus: null,
+                SignatureEngine: null,
+                SignatureMatches: [],
+                HashError: null,
+                ReputationError: null,
+                SignatureError: null))
+            .ToArray();
+        var record = ScanHistoryRecord.Restore(
+            Guid.NewGuid(),
+            ScanHistoryTargetKind.Directory,
+            "large-root",
+            recursive: true,
+            startedUtc,
+            startedUtc.AddSeconds(1),
+            ScanHistoryOutcome.Completed,
+            files,
+            issues: [],
+            errorMessage: null);
+        var stopwatch = Stopwatch.StartNew();
+
+        await store.AppendAsync(record);
+        var restored = await store.GetAsync(record.Id);
+
+        stopwatch.Stop();
+        Assert.IsNotNull(restored);
+        Assert.HasCount(2_000, restored.Files);
+        Assert.IsLessThan(TimeSpan.FromSeconds(30), stopwatch.Elapsed);
     }
 
     private static ScanHistoryRecord CreateRecord(Guid id, DateTimeOffset startedUtc)

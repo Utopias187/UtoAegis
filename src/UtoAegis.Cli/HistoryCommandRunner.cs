@@ -141,7 +141,26 @@ internal static class HistoryCommandRunner
         string path,
         CancellationToken cancellationToken)
     {
-        var store = new SqliteScanHistoryStore(path);
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ScanHistoryStoreException(
+                "The history database path is invalid.",
+                exception);
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            throw new ScanHistoryStoreException(
+                "The scan history database does not exist. Run a scan with --history first.");
+        }
+
+        var store = new SqliteScanHistoryStore(fullPath);
         await store.InitializeAsync(cancellationToken);
         return store;
     }
