@@ -44,10 +44,16 @@ internal static class ExitCodeResolver
         return result.HasDetections ? ExitCodes.ThreatDetected : ExitCodes.Success;
     }
 
+    public static int ForHistoryWriteFailure(bool detected) =>
+        detected
+            ? ExitCodes.ThreatDetectedWithHistoryFailure
+            : ExitCodes.HistoryStoreFailed;
+
     public static int ForOperationFailure(CliCommand command) => command switch
     {
         CliCommand.ScanDirectory => ExitCodes.DirectoryScanFailed,
         CliCommand.Scan => ExitCodes.ScanFailed,
-        _ => ExitCodes.ImportFailed
+        CliCommand.ImportHashes => ExitCodes.ImportFailed,
+        _ => ExitCodes.HistoryStoreFailed
     };
 }

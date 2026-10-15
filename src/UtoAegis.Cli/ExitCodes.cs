@@ -10,7 +10,9 @@ internal static class ExitCodes
     public const int SignatureScanFailed = 6;
     public const int DirectoryScanFailed = 7;
     public const int DirectoryScanPartial = 8;
+    public const int HistoryStoreFailed = 9;
     public const int ThreatDetected = 10;
     public const int ThreatDetectedWithPartialResults = 11;
+    public const int ThreatDetectedWithHistoryFailure = 12;
     public const int Cancelled = 130;
 }

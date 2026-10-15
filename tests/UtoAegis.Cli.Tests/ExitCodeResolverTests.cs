@@ -57,6 +57,22 @@ public sealed class ExitCodeResolverTests
         Assert.AreEqual(ExitCodes.DirectoryScanFailed, ExitCodeResolver.ForDirectory(result));
     }
 
+    [TestMethod]
+    public void ForHistoryWriteFailure_WithDetection_PreservesDetectionSignal()
+    {
+        Assert.AreEqual(
+            ExitCodes.ThreatDetectedWithHistoryFailure,
+            ExitCodeResolver.ForHistoryWriteFailure(detected: true));
+    }
+
+    [TestMethod]
+    public void ForHistoryWriteFailure_WithoutDetection_ReturnsHistoryFailure()
+    {
+        Assert.AreEqual(
+            ExitCodes.HistoryStoreFailed,
+            ExitCodeResolver.ForHistoryWriteFailure(detected: false));
+    }
+
     private static DirectoryScanResult FinishedDirectory(
         FileScanResult file,
         IReadOnlyList<DirectoryScanIssue> issues) =>

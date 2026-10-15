@@ -168,4 +168,85 @@ public sealed class CliOptionsTests
         Assert.IsNull(options);
         Assert.AreEqual("--recursive may only be supplied once.", error);
     }
+
+    [TestMethod]
+    public void TryParse_ScanWithHistory_ReturnsHistoryPath()
+    {
+        var parsed = CliOptions.TryParse(
+            ["scan", "--history", "history.db", "sample.bin"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual("history.db", options.HistoryPath);
+    }
+
+    [TestMethod]
+    public void TryParse_HistoryList_ReturnsBoundedLimit()
+    {
+        var parsed = CliOptions.TryParse(
+            ["history", "list", "--history", "history.db", "--limit", "50"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.HistoryList, options.Command);
+        Assert.AreEqual(50, options.HistoryLimit);
+    }
+
+    [TestMethod]
+    public void TryParse_HistoryShow_RequiresCanonicalScanId()
+    {
+        var parsed = CliOptions.TryParse(
+            ["history", "show", "--history", "history.db", "not-a-guid"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual(
+            "history show requires a scan ID in canonical GUID format.",
+            error);
+    }
+
+    [TestMethod]
+    public void TryParse_HistoryPrune_RequiresRetentionAge()
+    {
+        var parsed = CliOptions.TryParse(
+            ["history", "prune", "--history", "history.db"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual(
+            "history prune requires --older-than-days <days>.",
+            error);
+    }
+
+    [TestMethod]
+    public void TryParse_ImportWithHistory_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "import-hashes",
+                "--database",
+                "reputation.db",
+                "--history",
+                "history.db",
+                "indicators.jsonl"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual(
+            "--history is only valid with scans or history commands.",
+            error);
+    }
 }

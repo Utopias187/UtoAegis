@@ -1,9 +1,12 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using UtoAegis.Cli;
+using UtoAegis.Core.History;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
 using UtoAegis.Infrastructure.Importing;
+using UtoAegis.Infrastructure.History;
 using UtoAegis.Infrastructure.Reputation;
 using UtoAegis.Infrastructure.Signatures;
 
@@ -34,6 +37,9 @@ try
         CliCommand.Scan => await RunScanAsync(options, cancellation.Token),
         CliCommand.ScanDirectory => await RunDirectoryScanAsync(options, cancellation.Token),
         CliCommand.ImportHashes => await RunImportAsync(options, cancellation.Token),
+        CliCommand.HistoryList => await HistoryCommandRunner.ListAsync(options, cancellation.Token),
+        CliCommand.HistoryShow => await HistoryCommandRunner.ShowAsync(options, cancellation.Token),
+        CliCommand.HistoryPrune => await HistoryCommandRunner.PruneAsync(options, cancellation.Token),
         _ => ExitCodes.UsageError
     };
 }
@@ -59,6 +65,11 @@ catch (ReputationStoreException exception)
         ? ExitCodes.ImportFailed
         : ExitCodes.ReputationLookupFailed;
 }
+catch (ScanHistoryStoreException exception)
+{
+    Console.Error.WriteLine($"Scan history error: {exception.Message}");
+    return ExitCodes.HistoryStoreFailed;
+}
 catch (UnauthorizedAccessException)
 {
     Console.Error.WriteLine("The operation was denied by the file system.");
@@ -72,40 +83,60 @@ catch (IOException)
 
 static async Task<int> RunScanAsync(CliOptions options, CancellationToken cancellationToken)
 {
+    var scanId = Guid.NewGuid();
+    var startedUtc = DateTimeOffset.UtcNow;
+    var historyStore = await CreateHistoryStoreAsync(options, cancellationToken);
     if (!options.Quiet)
     {
-        JsonLogWriter.ScanStarted(options.InputPath!);
+        JsonLogWriter.ScanStarted(scanId, options.InputPath!);
     }
 
-    var scanner = await CreateFileScannerAsync(options, cancellationToken);
+    var scanner = await CreateFileScannerAsync(options, scanId, cancellationToken);
     var result = await scanner.ScanAsync(options.InputPath!, cancellationToken);
+    var completedUtc = DateTimeOffset.UtcNow;
 
     if (!options.Quiet)
     {
-        JsonLogWriter.ScanFinished(result.FileHash, result.Reputation);
+        JsonLogWriter.ScanFinished(scanId, result.FileHash, result.Reputation);
         if (result.Signatures is not null)
         {
-            JsonLogWriter.SignatureScanFinished(result.Signatures);
+            JsonLogWriter.SignatureScanFinished(scanId, result.Signatures);
         }
     }
 
-    WriteScanResult(options.Json, result);
-    return ExitCodeResolver.ForFile(result);
+    var history = await PersistHistoryAsync(
+        options,
+        historyStore,
+        ScanHistoryRecord.FromFileScan(
+            scanId,
+            options.InputPath!,
+            startedUtc,
+            completedUtc,
+            result),
+        cancellationToken);
+    WriteScanResult(options.Json, result, scanId, history);
+    return history.Requested && !history.Stored
+        ? ExitCodeResolver.ForHistoryWriteFailure(result.IsDetected)
+        : ExitCodeResolver.ForFile(result);
 }
 
 static async Task<int> RunDirectoryScanAsync(
     CliOptions options,
     CancellationToken cancellationToken)
 {
+    var scanId = Guid.NewGuid();
+    var startedUtc = DateTimeOffset.UtcNow;
+    var historyStore = await CreateHistoryStoreAsync(options, cancellationToken);
     if (!options.Quiet)
     {
         JsonLogWriter.DirectoryScanStarted(
+            scanId,
             options.InputPath!,
             options.Recursive,
             options.MaximumConcurrency);
     }
 
-    var fileScanner = await CreateFileScannerAsync(options, cancellationToken);
+    var fileScanner = await CreateFileScannerAsync(options, scanId, cancellationToken);
     var directoryScanner = new DirectoryScanner(
         fileScanner,
         new DirectoryScanOptions(
@@ -113,18 +144,33 @@ static async Task<int> RunDirectoryScanAsync(
             maximumConcurrency: options.MaximumConcurrency,
             excludedPaths: DirectoryScanExclusions(options)));
     var result = await directoryScanner.ScanAsync(options.InputPath!, cancellationToken);
+    var completedUtc = DateTimeOffset.UtcNow;
 
     if (!options.Quiet)
     {
-        JsonLogWriter.DirectoryScanFinished(result);
+        JsonLogWriter.DirectoryScanFinished(scanId, result);
     }
 
-    WriteDirectoryScanResult(options.Json, options, result);
-    return ExitCodeResolver.ForDirectory(result);
+    var history = await PersistHistoryAsync(
+        options,
+        historyStore,
+        ScanHistoryRecord.FromDirectoryScan(
+            scanId,
+            options.InputPath!,
+            options.Recursive,
+            startedUtc,
+            completedUtc,
+            result),
+        cancellationToken);
+    WriteDirectoryScanResult(options.Json, options, result, scanId, history);
+    return history.Requested && !history.Stored
+        ? ExitCodeResolver.ForHistoryWriteFailure(result.HasDetections)
+        : ExitCodeResolver.ForDirectory(result);
 }
 
 static async ValueTask<IFileScanner> CreateFileScannerAsync(
     CliOptions options,
+    Guid scanId,
     CancellationToken cancellationToken)
 {
     IHashReputationStore? reputationStore = null;
@@ -145,6 +191,7 @@ static async ValueTask<IFileScanner> CreateFileScannerAsync(
         if (!options.Quiet)
         {
             JsonLogWriter.SignatureRulesLoaded(
+                scanId,
                 options.SignaturePath,
                 ruleFile.Rules.Count,
                 ruleFile.DuplicateCount);
@@ -155,6 +202,112 @@ static async ValueTask<IFileScanner> CreateFileScannerAsync(
         new Sha256FileHashScanner(),
         reputationStore,
         signatureScanner);
+}
+
+static async ValueTask<IScanHistoryStore?> CreateHistoryStoreAsync(
+    CliOptions options,
+    CancellationToken cancellationToken)
+{
+    if (options.HistoryPath is null)
+    {
+        return null;
+    }
+
+    string historyPath;
+    try
+    {
+        historyPath = Path.GetFullPath(options.HistoryPath);
+        foreach (var conflictingPath in HistoryConflictingPaths(options))
+        {
+            if (PathsEqual(historyPath, conflictingPath))
+            {
+                throw new ScanHistoryStoreException(
+                    "The history database must be separate from scan inputs, rule files, and the reputation database.");
+            }
+        }
+    }
+    catch (ScanHistoryStoreException)
+    {
+        throw;
+    }
+    catch (Exception exception) when (
+        exception is ArgumentException or NotSupportedException or PathTooLongException)
+    {
+        throw new ScanHistoryStoreException(
+            "The history database path is invalid.",
+            exception);
+    }
+
+    var store = new SqliteScanHistoryStore(historyPath);
+    await store.InitializeAsync(cancellationToken);
+    return store;
+}
+
+static IEnumerable<string> HistoryConflictingPaths(CliOptions options)
+{
+    if (options.DatabasePath is not null)
+    {
+        yield return Path.GetFullPath(options.DatabasePath);
+    }
+
+    if (options.SignaturePath is not null)
+    {
+        yield return Path.GetFullPath(options.SignaturePath);
+    }
+
+    if (options.Command == CliCommand.Scan && options.InputPath is not null)
+    {
+        yield return Path.GetFullPath(options.InputPath);
+    }
+}
+
+static bool PathsEqual(string first, string second) =>
+    string.Equals(
+        first,
+        second,
+        OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal);
+
+static async ValueTask<HistoryPersistenceResult> PersistHistoryAsync(
+    CliOptions options,
+    IScanHistoryStore? store,
+    ScanHistoryRecord record,
+    CancellationToken cancellationToken)
+{
+    if (store is null || options.HistoryPath is null)
+    {
+        return new HistoryPersistenceResult(false, false, null, null);
+    }
+
+    try
+    {
+        await store.AppendAsync(record, cancellationToken);
+        if (!options.Quiet)
+        {
+            JsonLogWriter.HistoryStored(record, options.HistoryPath);
+        }
+
+        return new HistoryPersistenceResult(
+            true,
+            true,
+            Path.GetFullPath(options.HistoryPath),
+            null);
+    }
+    catch (ScanHistoryStoreException exception)
+    {
+        Console.Error.WriteLine($"Scan completed, but history storage failed: {exception.Message}");
+        if (!options.Quiet)
+        {
+            JsonLogWriter.HistoryStoreFailed(record.Id, options.HistoryPath, exception.Message);
+        }
+
+        return new HistoryPersistenceResult(
+            true,
+            false,
+            Path.GetFullPath(options.HistoryPath),
+            exception.Message);
+    }
 }
 
 static IReadOnlyCollection<string> DirectoryScanExclusions(CliOptions options)
@@ -171,6 +324,14 @@ static IReadOnlyCollection<string> DirectoryScanExclusions(CliOptions options)
         paths.Add(databasePath);
         paths.Add(databasePath + "-shm");
         paths.Add(databasePath + "-wal");
+    }
+
+    if (options.HistoryPath is not null)
+    {
+        var historyPath = Path.GetFullPath(options.HistoryPath);
+        paths.Add(historyPath);
+        paths.Add(historyPath + "-shm");
+        paths.Add(historyPath + "-wal");
     }
 
     return paths;
@@ -215,29 +376,40 @@ static async Task<int> RunImportAsync(CliOptions options, CancellationToken canc
     return ExitCodes.Success;
 }
 
-static void WriteScanResult(bool json, FileScanResult result)
+static void WriteScanResult(
+    bool json,
+    FileScanResult result,
+    Guid scanId,
+    HistoryPersistenceResult history)
 {
     if (json)
     {
-        Console.WriteLine(JsonSerializer.Serialize(
+        var payload = JsonSerializer.SerializeToNode(
             CreateFileScanPayload(result),
-            CliJson.ResultOptions));
+            CliJson.ResultOptions)!.AsObject();
+        payload["scanId"] = JsonValue.Create(scanId);
+        payload["history"] = CreateHistoryPersistencePayload(history);
+        Console.WriteLine(payload.ToJsonString(CliJson.ResultOptions));
         return;
     }
 
     WriteHumanFileDetails(result);
+    WriteHumanHistoryStatus(scanId, history);
 }
 
 static void WriteDirectoryScanResult(
     bool json,
     CliOptions options,
-    DirectoryScanResult result)
+    DirectoryScanResult result,
+    Guid scanId,
+    HistoryPersistenceResult history)
 {
     if (json)
     {
         Console.WriteLine(JsonSerializer.Serialize(
             new
             {
+                scanId,
                 status = result.Status.ToString(),
                 rootPath = result.RootPath,
                 recursive = options.Recursive,
@@ -251,6 +423,7 @@ static void WriteDirectoryScanResult(
                     failedFileCount = result.FailedFileCount,
                     issueCount = result.Issues.Count
                 },
+                history = CreateHistoryPersistencePayload(history),
                 issues = result.Issues.Select(issue => new
                 {
                     path = issue.Path,
@@ -268,6 +441,7 @@ static void WriteDirectoryScanResult(
         Console.Error.WriteLine(
             $"Directory scan failed ({result.Status}): {result.ErrorMessage}");
         WriteDirectoryIssues(result.Issues);
+        WriteHumanHistoryStatus(scanId, history);
         return;
     }
 
@@ -291,6 +465,36 @@ static void WriteDirectoryScanResult(
     }
 
     WriteDirectoryIssues(result.Issues);
+    WriteHumanHistoryStatus(scanId, history);
+}
+
+static JsonNode? CreateHistoryPersistencePayload(HistoryPersistenceResult history) =>
+    history.Requested
+        ? JsonSerializer.SerializeToNode(
+            new
+            {
+                stored = history.Stored,
+                databasePath = history.DatabasePath,
+                error = history.ErrorMessage
+            },
+            CliJson.ResultOptions)
+        : null;
+
+static void WriteHumanHistoryStatus(Guid scanId, HistoryPersistenceResult history)
+{
+    if (!history.Requested)
+    {
+        return;
+    }
+
+    if (history.Stored)
+    {
+        Console.WriteLine($"History: stored scan {scanId:D} in {history.DatabasePath}");
+    }
+    else
+    {
+        Console.Error.WriteLine($"History: scan {scanId:D} was not stored.");
+    }
 }
 
 static object CreateFileScanPayload(FileScanResult result)
@@ -420,23 +624,32 @@ static void PrintUsage()
 {
     Console.WriteLine(
         """
-        UtoAegis file, directory, hash-reputation, and signature scanner
+        UtoAegis file, directory, hash-reputation, signature, and history scanner
 
         Usage:
-          utoaegis [scan] [--database <path>] [--signatures <path>] [--json] [--quiet] [--] <file>
-          utoaegis scan-directory [--recursive] [--max-concurrency <1-32>] [--database <path>] [--signatures <path>] [--json] [--quiet] [--] <directory>
+          utoaegis [scan] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <file>
+          utoaegis scan-directory [--recursive] [--max-concurrency <1-32>] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <directory>
           utoaegis import-hashes --database <path> [--json] [--quiet] <indicators.jsonl>
+          utoaegis history list --history <path> [--limit <1-200>] [--json]
+          utoaegis history show --history <path> [--json] <scan-id>
+          utoaegis history prune --history <path> --older-than-days <1-36500> [--json]
 
         Commands:
           scan            Calculate SHA-256 and optionally run reputation and signature checks.
           scan-directory  Scan each regular file in a directory without following reparse points.
           import-hashes   Validate and transactionally import JSON Lines indicators.
+          history list    List recent stored scan summaries, newest first.
+          history show    Show one complete stored scan record.
+          history prune   Delete records older than the configured retention age.
 
         Options:
           --recursive        Include nested directories; disabled by default.
           --max-concurrency  Concurrent file scans for scan-directory; default 4, maximum 32.
           --database         SQLite reputation database path.
           --signatures       JSON Lines exact-byte signature rule file.
+          --history          Separate SQLite database for opt-in scan history.
+          --limit            Maximum history summaries to list; default 25, maximum 200.
+          --older-than-days  Delete history older than this many days.
           --json             Emit the result as JSON.
           --quiet            Suppress structured operational logs on stderr.
           --                 Treat all following arguments as positional values.

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using UtoAegis.Core.History;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
@@ -9,12 +10,14 @@ internal static class JsonLogWriter
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
-    public static void ScanStarted(string path) => Write(
-        "information", "hash_scan_started", path, null, null);
+    public static void ScanStarted(Guid scanId, string path) => Write(
+        scanId, "information", "hash_scan_started", path, null, null);
 
     public static void ScanFinished(
+        Guid scanId,
         FileHashScanResult result,
         HashReputationResult? reputation) => Write(
+        scanId,
         result.IsSuccess ? "information" : "warning",
         result.IsSuccess ? "hash_scan_completed" : "hash_scan_failed",
         result.Path,
@@ -43,6 +46,7 @@ internal static class JsonLogWriter
     }
 
     public static void SignatureRulesLoaded(
+        Guid scanId,
         string rulePath,
         int ruleCount,
         int duplicateCount)
@@ -52,6 +56,7 @@ internal static class JsonLogWriter
             timestampUtc = DateTimeOffset.UtcNow,
             level = "information",
             eventName = "signature_rules_loaded",
+            scanId,
             rulePath = Path.GetFullPath(rulePath),
             ruleCount,
             duplicateCount
@@ -60,7 +65,8 @@ internal static class JsonLogWriter
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
     }
 
-    public static void SignatureScanFinished(SignatureScanResult result) => Write(
+    public static void SignatureScanFinished(Guid scanId, SignatureScanResult result) => Write(
+        scanId,
         result.IsCompleted ? "information" : "warning",
         result.IsCompleted ? "signature_scan_completed" : "signature_scan_failed",
         result.Path,
@@ -68,6 +74,7 @@ internal static class JsonLogWriter
         result.Elapsed.TotalMilliseconds);
 
     public static void DirectoryScanStarted(
+        Guid scanId,
         string path,
         bool recursive,
         int maximumConcurrency)
@@ -77,6 +84,7 @@ internal static class JsonLogWriter
             timestampUtc = DateTimeOffset.UtcNow,
             level = "information",
             eventName = "directory_scan_started",
+            scanId,
             path,
             recursive,
             maximumConcurrency
@@ -85,7 +93,7 @@ internal static class JsonLogWriter
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
     }
 
-    public static void DirectoryScanFinished(DirectoryScanResult result)
+    public static void DirectoryScanFinished(Guid scanId, DirectoryScanResult result)
     {
         var logEntry = new
         {
@@ -94,6 +102,7 @@ internal static class JsonLogWriter
             eventName = result.IsCompleted
                 ? "directory_scan_completed"
                 : "directory_scan_failed",
+            scanId,
             path = result.RootPath,
             status = result.Status.ToString(),
             elapsedMilliseconds = result.Elapsed.TotalMilliseconds,
@@ -106,7 +115,41 @@ internal static class JsonLogWriter
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
     }
 
+    public static void HistoryStored(ScanHistoryRecord record, string databasePath)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "information",
+            eventName = "scan_history_stored",
+            scanId = record.Id,
+            databasePath = Path.GetFullPath(databasePath),
+            outcome = record.Outcome.ToString(),
+            fileCount = record.Files.Count,
+            detectedFileCount = record.DetectedFileCount,
+            issueCount = record.Issues.Count
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void HistoryStoreFailed(Guid scanId, string databasePath, string message)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = "error",
+            eventName = "scan_history_store_failed",
+            scanId,
+            databasePath = Path.GetFullPath(databasePath),
+            message
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
     private static void Write(
+        Guid scanId,
         string level,
         string eventName,
         string? path,
@@ -119,6 +162,7 @@ internal static class JsonLogWriter
             timestampUtc = DateTimeOffset.UtcNow,
             level,
             eventName,
+            scanId,
             path,
             status,
             elapsedMilliseconds,

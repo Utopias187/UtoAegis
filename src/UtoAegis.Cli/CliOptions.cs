@@ -7,7 +7,10 @@ internal enum CliCommand
 {
     Scan,
     ScanDirectory,
-    ImportHashes
+    ImportHashes,
+    HistoryList,
+    HistoryShow,
+    HistoryPrune
 }
 
 internal sealed record CliOptions(
@@ -15,12 +18,19 @@ internal sealed record CliOptions(
     string? InputPath,
     string? DatabasePath,
     string? SignaturePath,
+    string? HistoryPath,
     bool Recursive,
     int MaximumConcurrency,
+    int HistoryLimit,
+    int? OlderThanDays,
     bool Json,
     bool Quiet,
     bool ShowHelp)
 {
+    public const int DefaultHistoryLimit = 25;
+    public const int MaximumHistoryLimit = 200;
+    public const int MaximumRetentionDays = 36_500;
+
     public static bool TryParse(string[] args, out CliOptions? options, out string? error)
     {
         var command = CliCommand.Scan;
@@ -40,6 +50,33 @@ internal sealed record CliOptions(
             command = CliCommand.ScanDirectory;
             index++;
         }
+        else if (args.Length > 0 && args[0] == "history")
+        {
+            if (args.Length < 2)
+            {
+                return Fail(
+                    "history requires a subcommand: list, show, or prune.",
+                    out options,
+                    out error);
+            }
+
+            command = args[1] switch
+            {
+                "list" => CliCommand.HistoryList,
+                "show" => CliCommand.HistoryShow,
+                "prune" => CliCommand.HistoryPrune,
+                _ => (CliCommand)(-1)
+            };
+            if ((int)command == -1)
+            {
+                return Fail(
+                    $"Unknown history subcommand: {args[1]}",
+                    out options,
+                    out error);
+            }
+
+            index = 2;
+        }
 
         var json = false;
         var quiet = false;
@@ -49,8 +86,12 @@ internal sealed record CliOptions(
         var parseOptions = true;
         var maximumConcurrency = DirectoryScanOptions.DefaultMaximumConcurrency;
         var maximumConcurrencySpecified = false;
+        var historyLimit = DefaultHistoryLimit;
+        var historyLimitSpecified = false;
+        int? olderThanDays = null;
         string? databasePath = null;
         string? signaturePath = null;
+        string? historyPath = null;
         string? inputPath = null;
 
         while (index < args.Length)
@@ -76,6 +117,77 @@ internal sealed record CliOptions(
                 }
 
                 signaturePath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--history")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--history requires a path.", out options, out error);
+                }
+
+                if (historyPath is not null)
+                {
+                    return Fail("--history may only be supplied once.", out options, out error);
+                }
+
+                historyPath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--limit")
+            {
+                if (index >= args.Length ||
+                    !int.TryParse(
+                        args[index],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out historyLimit) ||
+                    historyLimit is < 1 or > MaximumHistoryLimit)
+                {
+                    return Fail(
+                        $"--limit requires an integer from 1 to {MaximumHistoryLimit}.",
+                        out options,
+                        out error);
+                }
+
+                if (historyLimitSpecified)
+                {
+                    return Fail("--limit may only be supplied once.", out options, out error);
+                }
+
+                index++;
+                historyLimitSpecified = true;
+                continue;
+            }
+
+            if (parseOptions && argument == "--older-than-days")
+            {
+                if (index >= args.Length ||
+                    !int.TryParse(
+                        args[index],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out var parsedDays) ||
+                    parsedDays is < 1 or > MaximumRetentionDays)
+                {
+                    return Fail(
+                        $"--older-than-days requires an integer from 1 to {MaximumRetentionDays}.",
+                        out options,
+                        out error);
+                }
+
+                if (olderThanDays is not null)
+                {
+                    return Fail(
+                        "--older-than-days may only be supplied once.",
+                        out options,
+                        out error);
+                }
+
+                index++;
+                olderThanDays = parsedDays;
                 continue;
             }
 
@@ -167,15 +279,25 @@ internal sealed record CliOptions(
             inputPath = argument;
         }
 
-        if (!showHelp && inputPath is null)
+        var requiresInput = command is CliCommand.Scan or
+            CliCommand.ScanDirectory or
+            CliCommand.ImportHashes or
+            CliCommand.HistoryShow;
+        if (!showHelp && requiresInput && inputPath is null)
         {
             var inputName = command switch
             {
                 CliCommand.Scan => "file",
                 CliCommand.ScanDirectory => "directory",
-                _ => "JSON Lines import file"
+                CliCommand.ImportHashes => "JSON Lines import file",
+                _ => "scan ID"
             };
             return Fail($"A {inputName} path is required.", out options, out error);
+        }
+
+        if (!showHelp && !requiresInput && inputPath is not null)
+        {
+            return Fail("This command does not accept a positional value.", out options, out error);
         }
 
         if (!showHelp && command == CliCommand.ImportHashes && databasePath is null)
@@ -187,6 +309,28 @@ internal sealed record CliOptions(
         {
             return Fail(
                 "--signatures is only valid with scan or scan-directory.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command == CliCommand.ImportHashes && historyPath is not null)
+        {
+            return Fail(
+                "--history is only valid with scans or history commands.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && IsHistoryCommand(command) && historyPath is null)
+        {
+            return Fail("History commands require --history <path>.", out options, out error);
+        }
+
+        if (!showHelp && IsHistoryCommand(command) &&
+            (databasePath is not null || signaturePath is not null))
+        {
+            return Fail(
+                "--database and --signatures are not valid with history commands.",
                 out options,
                 out error);
         }
@@ -204,19 +348,61 @@ internal sealed record CliOptions(
                 out error);
         }
 
+        if (!showHelp && command != CliCommand.HistoryList && historyLimitSpecified)
+        {
+            return Fail("--limit is only valid with history list.", out options, out error);
+        }
+
+        if (!showHelp && command != CliCommand.HistoryPrune && olderThanDays is not null)
+        {
+            return Fail(
+                "--older-than-days is only valid with history prune.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command == CliCommand.HistoryPrune && olderThanDays is null)
+        {
+            return Fail(
+                "history prune requires --older-than-days <days>.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command == CliCommand.HistoryShow &&
+            !Guid.TryParseExact(inputPath, "D", out _))
+        {
+            return Fail(
+                "history show requires a scan ID in canonical GUID format.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command == CliCommand.HistoryShow)
+        {
+            inputPath = Guid.ParseExact(inputPath!, "D")
+                .ToString("D", CultureInfo.InvariantCulture);
+        }
+
         options = new CliOptions(
             command,
             inputPath,
             databasePath,
             signaturePath,
+            historyPath,
             recursive,
             maximumConcurrency,
+            historyLimit,
+            olderThanDays,
             json,
             quiet,
             showHelp);
         error = null;
         return true;
     }
+
+    private static bool IsHistoryCommand(CliCommand command) =>
+        command is CliCommand.HistoryList or CliCommand.HistoryShow or CliCommand.HistoryPrune;
 
     private static bool Fail(
         string message,
