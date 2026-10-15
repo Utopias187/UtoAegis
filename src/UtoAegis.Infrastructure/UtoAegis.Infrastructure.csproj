@@ -3,4 +3,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="../UtoAegis.Core/UtoAegis.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="UtoAegis.Infrastructure.Tests" />
+  </ItemGroup>
 </Project>
