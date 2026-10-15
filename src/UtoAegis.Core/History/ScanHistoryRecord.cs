@@ -110,7 +110,7 @@ public sealed record ScanHistoryRecord
             result.ErrorMessage);
     }
 
-    internal static ScanHistoryRecord Rehydrate(
+    public static ScanHistoryRecord Restore(
         Guid id,
         ScanHistoryTargetKind targetKind,
         string targetPath,
