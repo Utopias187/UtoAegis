@@ -4,6 +4,7 @@ using UtoAegis.Cli;
 using UtoAegis.Core.History;
 using UtoAegis.Core.Monitoring;
 using UtoAegis.Core.Quarantine;
+using UtoAegis.Core.Response;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
@@ -235,7 +236,7 @@ static async Task<int> RunQuarantineAddAsync(
 
     using var store = new FileSystemQuarantineStore(options.VaultPath!);
     await store.InitializeAsync(cancellationToken);
-    var evidence = CreateQuarantineEvidence(result);
+    var evidence = DetectionEvidence.FromFileScan(result);
     var quarantine = await store.QuarantineAsync(
         new QuarantineRequest(
             result.FileHash.Path!,
@@ -258,37 +259,6 @@ static async Task<int> RunQuarantineAddAsync(
     return history.Requested && !history.Stored
         ? ExitCodes.ThreatDetectedWithHistoryFailure
         : ExitCodes.Quarantined;
-}
-
-static IReadOnlyCollection<string> CreateQuarantineEvidence(FileScanResult result)
-{
-    var evidence = new List<string>();
-    if (result.Reputation?.Status == HashReputationStatus.Malicious)
-    {
-        evidence.Add("hash-reputation");
-    }
-
-    var ruleIds = result.Signatures?.Matches
-        .Select(match => match.RuleId)
-        .Distinct(StringComparer.Ordinal)
-        .Order(StringComparer.Ordinal)
-        .ToArray() ?? [];
-    var availableRuleSlots = QuarantineRequest.MaximumEvidenceCount - evidence.Count;
-    var includeSummary = ruleIds.Length > availableRuleSlots;
-    if (includeSummary)
-    {
-        availableRuleSlots--;
-    }
-
-    evidence.AddRange(ruleIds
-        .Take(availableRuleSlots)
-        .Select(ruleId => $"signature:{ruleId}"));
-    if (includeSummary)
-    {
-        evidence.Add($"signature-match-count:{ruleIds.Length}");
-    }
-
-    return evidence;
 }
 
 static void WriteQuarantineAddResult(
