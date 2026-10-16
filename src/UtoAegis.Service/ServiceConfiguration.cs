@@ -138,10 +138,21 @@ public sealed class ServiceConfiguration
                     "Quarantine response mode requires VaultPath.");
             }
 
-            if (vaultPath is not null && IsWithin(monitorRoot, vaultPath))
+            var writablePaths = new[] { databasePath, historyPath, vaultPath }
+                .Where(path => path is not null)
+                .Select(path => path!)
+                .ToArray();
+            if (writablePaths.Any(path => IsWithin(monitorRoot, path)))
             {
                 throw new ServiceConfigurationException(
-                    "VaultPath must be outside MonitorRoot to prevent monitoring loops.");
+                    "DatabasePath, HistoryPath, and VaultPath must be outside MonitorRoot " +
+                    "to preserve least privilege and prevent monitoring loops.");
+            }
+
+            if (IsWithin(monitorRoot, Path.GetFullPath(baseDirectory)))
+            {
+                throw new ServiceConfigurationException(
+                    "The service installation directory must be outside MonitorRoot.");
             }
 
             var responsePolicy = new ResponsePolicy(

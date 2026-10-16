@@ -79,6 +79,21 @@ public sealed class ServiceConfigurationTests
     }
 
     [TestMethod]
+    public void Load_WritableDatabaseInsideMonitorRoot_Throws()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:DatabasePath"] = Path.Combine(monitorRoot, "reputation.db")
+        });
+
+        var exception = Assert.ThrowsExactly<ServiceConfigurationException>(() =>
+            ServiceConfiguration.Load(configuration, testDirectory));
+
+        StringAssert.Contains(exception.Message, "outside MonitorRoot");
+    }
+
+    [TestMethod]
     public void Load_WithoutDetectionSource_Throws()
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
