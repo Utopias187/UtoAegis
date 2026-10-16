@@ -48,7 +48,7 @@ function Set-DirectoryGrant {
     param(
         [string] $Path,
         [string] $Identity,
-        [ValidateSet('RX', 'M')]
+        [ValidateSet('RX', 'RXDC', 'M')]
         [string] $Rights,
         [switch] $Create
     )
@@ -66,7 +66,12 @@ function Set-DirectoryGrant {
         throw "Required directory does not exist: $fullPath"
     }
 
-    & "$env:SystemRoot\System32\icacls.exe" $fullPath /grant "${Identity}:(OI)(CI)$Rights"
+    $permission = switch ($Rights) {
+        'RX' { '(OI)(CI)RX' }
+        'RXDC' { '(OI)(CI)(GR,GE,DC)' }
+        'M' { '(OI)(CI)M' }
+    }
+    & "$env:SystemRoot\System32\icacls.exe" $fullPath /grant "${Identity}:$permission"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to grant $Rights access to $fullPath"
     }
@@ -94,7 +99,7 @@ $responseMode = if ([string]::IsNullOrWhiteSpace([string]$settings.Response.Mode
 } else {
     [string]$settings.Response.Mode
 }
-if ($responseMode -eq 'Quarantine' -and -not $AllowQuarantineResponse) {
+if ($responseMode -ieq 'Quarantine' -and -not $AllowQuarantineResponse) {
     throw 'Quarantine mode requires the explicit -AllowQuarantineResponse installer switch.'
 }
 
@@ -125,7 +130,8 @@ try {
     Invoke-Sc failureflag $ServiceName '1'
 
     Set-DirectoryGrant $publish $serviceIdentity 'RX'
-    Set-DirectoryGrant $monitorRoot $serviceIdentity 'RX'
+    $monitorRights = if ($responseMode -ieq 'Quarantine') { 'RXDC' } else { 'RX' }
+    Set-DirectoryGrant $monitorRoot $serviceIdentity $monitorRights
 
     $writeDirectories = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::OrdinalIgnoreCase)
