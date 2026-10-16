@@ -180,7 +180,9 @@ public sealed class ServiceConfiguration
 
             var responsePolicy = new ResponsePolicy(
                 mode,
-                ReadValues(responseSection.GetSection("AllowlistedPathPrefixes")),
+                ReadValues(responseSection.GetSection("AllowlistedPathPrefixes"))
+                    .Select(path => ResolvePath(path, baseDirectory))
+                    .ToArray(),
                 ReadValues(responseSection.GetSection("AllowlistedSha256")),
                 ReadInt(responseSection, "MaxActionsPerWindow", 3),
                 TimeSpan.FromSeconds(ReadInt(responseSection, "RateLimitWindowSeconds", 300)));
@@ -273,6 +275,11 @@ public sealed class ServiceConfiguration
             return null;
         }
 
+        return ResolvePath(value, baseDirectory);
+    }
+
+    private static string ResolvePath(string value, string baseDirectory)
+    {
         var expanded = Environment.ExpandEnvironmentVariables(value.Trim());
         return Path.GetFullPath(expanded, Path.GetFullPath(baseDirectory));
     }

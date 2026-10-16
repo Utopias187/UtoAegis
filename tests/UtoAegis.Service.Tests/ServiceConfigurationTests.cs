@@ -151,7 +151,7 @@ public sealed class ServiceConfigurationTests
             ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:VaultPath"] = "vault",
             ["UtoAegis:Response:Mode"] = "DryRunQuarantine",
-            ["UtoAegis:Response:AllowlistedPathPrefixes:0"] = monitorRoot,
+            ["UtoAegis:Response:AllowlistedPathPrefixes:0"] = "allowed",
             ["UtoAegis:Response:AllowlistedSha256:0"] = new string('A', 64),
             ["UtoAegis:Response:MaxActionsPerWindow"] = "7",
             ["UtoAegis:Response:RateLimitWindowSeconds"] = "120"
@@ -163,6 +163,9 @@ public sealed class ServiceConfigurationTests
         Assert.AreEqual(7, result.ResponsePolicy.MaxActionsPerWindow);
         Assert.AreEqual(TimeSpan.FromMinutes(2), result.ResponsePolicy.RateLimitWindow);
         Assert.HasCount(1, result.ResponsePolicy.AllowlistedPathPrefixes);
+        Assert.AreEqual(
+            Path.Combine(testDirectory, "allowed"),
+            result.ResponsePolicy.AllowlistedPathPrefixes[0]);
         Assert.IsTrue(result.ResponsePolicy.AllowlistedSha256.Contains(new string('a', 64)));
     }
 
