@@ -37,4 +37,20 @@ public sealed class QuarantineEntryTests
             DateTimeOffset.UtcNow,
             ["signature:demo"]));
     }
+
+    [TestMethod]
+    public void Restore_PendingEntryRequiresPathWithoutTimestamp()
+    {
+        Assert.ThrowsExactly<ArgumentException>(() => QuarantineEntry.Restore(
+            Guid.NewGuid(),
+            QuarantineEntryStatus.RestorePending,
+            "sample.bin",
+            Hash,
+            12,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            ["signature:demo"],
+            restoredPath: null,
+            restoredUtc: null));
+    }
 }

@@ -73,15 +73,26 @@ public sealed record QuarantineEntry
 
         ArgumentOutOfRangeException.ThrowIfNegative(length);
         ArgumentNullException.ThrowIfNull(detectionEvidence);
-        if (detectionEvidence.Count == 0)
+        if (detectionEvidence.Count is 0 or > QuarantineRequest.MaximumEvidenceCount ||
+            detectionEvidence.Any(value =>
+                string.IsNullOrWhiteSpace(value) ||
+                value.Length > QuarantineRequest.MaximumEvidenceLength ||
+                value.Any(char.IsControl)))
         {
-            throw new ArgumentException("Detection evidence is required.", nameof(detectionEvidence));
+            throw new ArgumentException("Stored detection evidence is invalid.", nameof(detectionEvidence));
         }
 
         if (status == QuarantineEntryStatus.Restored &&
             (string.IsNullOrWhiteSpace(restoredPath) || restoredUtc is null))
         {
             throw new ArgumentException("Restored entries require a path and timestamp.");
+        }
+
+        if (status == QuarantineEntryStatus.RestorePending &&
+            (string.IsNullOrWhiteSpace(restoredPath) || restoredUtc is not null))
+        {
+            throw new ArgumentException(
+                "Pending restorations require a path and cannot contain a completion time.");
         }
 
         if (status == QuarantineEntryStatus.Active &&
