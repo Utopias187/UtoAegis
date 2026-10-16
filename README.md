@@ -3,19 +3,21 @@
 UtoAegis is an incrementally developed Windows endpoint-security product. It
 currently combines safe SHA-256 hashing, a versioned local reputation database,
 streaming exact-byte signature detection, bounded directory traversal, and
-opt-in structured scan history with real-time directory monitoring. It does not
-execute scanned files or automatically delete them.
+opt-in structured scan history, real-time directory monitoring, and reversible
+quarantine. It does not execute scanned files or automatically quarantine or
+delete them.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
 
 ## Current architecture
 
-- `UtoAegis.Core` contains file, directory, history, and monitoring contracts,
-  result models, validation, orchestration, and hash, reputation, and signature
-  engines. It has no SQLite dependency.
+- `UtoAegis.Core` contains file, directory, history, monitoring, and quarantine
+  contracts, result models, validation, orchestration, and hash, reputation,
+  and signature engines. It has no SQLite dependency.
 - `UtoAegis.Infrastructure` contains separate SQLite reputation and scan-history
-  stores, strict JSON Lines readers, and the bounded filesystem event source.
+  stores, strict JSON Lines readers, the bounded filesystem event source, and
+  the restricted filesystem quarantine vault.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 
@@ -28,6 +30,7 @@ single file ------------------------------------------|-> composite file scanner
                                                        |-> optional history store
 filesystem events -> bounded queue -> debounce --------|
                          | overflow -> recovery directory scan
+detection result -> identity recheck -> restricted vault -> verified restore
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -149,6 +152,56 @@ With `--json`, standard output is a JSON Lines stream containing a separate
 history is appended per scan. Operational JSON Lines logs remain on standard
 error and can be suppressed with `--quiet`.
 
+## Quarantine and recovery
+
+Quarantine is an explicit command and requires at least one configured detector.
+The file is scanned first and is not moved unless that complete scan reports a
+hash-reputation or signature match:
+
+```powershell
+Copy-Item samples/harmless-test-file.txt harmless-quarantine-test.txt
+
+dotnet run --project src/UtoAegis.Cli -- quarantine add `
+  --vault data/quarantine `
+  --signatures samples/signatures.example.jsonl `
+  --history data/history.db `
+  harmless-quarantine-test.txt
+```
+
+The demonstration rule deliberately matches harmless text. Do not test this
+workflow with real malware.
+
+The vault reopens the detected file through a Windows handle, prevents new
+write or delete sharing, recomputes SHA-256 and length through that exact handle,
+flushes the payload and recovery metadata, and only then marks the same handle
+for deletion. If identity changed after scanning, the source is preserved and
+quarantine fails.
+
+Inspect and restore entries with their canonical quarantine ID:
+
+```powershell
+dotnet run --project src/UtoAegis.Cli -- quarantine list `
+  --vault data/quarantine --limit 25
+
+dotnet run --project src/UtoAegis.Cli -- quarantine show `
+  --vault data/quarantine <quarantine-id>
+
+dotnet run --project src/UtoAegis.Cli -- quarantine restore `
+  --vault data/quarantine `
+  --destination restored-quarantine-test.txt `
+  <quarantine-id>
+```
+
+Restore verifies the retained payload's SHA-256 and length, rejects reparse-point
+destination paths, and never overwrites a file or directory. The payload remains
+in the vault after restore for recovery evidence; there is no purge command yet.
+
+On Windows, vault ACL inheritance is disabled. Access is limited to the current
+user, Local System, and administrators, and the current user receives an
+explicit execute deny on inherited files. Payloads also use the hidden,
+read-only `.uaq` extension. The vault is not encrypted or tamper-evident, so its
+directory still requires normal host and backup protections.
+
 ## Detection history and structured logs
 
 History is disabled unless `--history` is supplied. Keep its SQLite database
@@ -252,6 +305,9 @@ a clean-file verdict.
 | `11` | A detection occurred, but the directory scan was partial. |
 | `12` | A detection occurred, but its requested history record could not be stored. |
 | `13` | Real-time monitoring could not start or failed because of a filesystem operation. |
+| `14` | A detected file was successfully quarantined. |
+| `15` | Quarantine storage or management failed. |
+| `16` | Restore failed or was refused to avoid an overwrite or integrity violation. |
 | `130` | Operation was cancelled. |
 
 ## Security review
@@ -297,7 +353,19 @@ a clean-file verdict.
   immediately before scanning. Reparse points are not followed, but replacement
   races remain possible after validation.
 - Detection is currently observational. No file is quarantined, deleted, or
-  modified automatically.
+  modified automatically; quarantine requires an explicit command.
+- Quarantine requires a completed detection and rechecks the expected SHA-256
+  and length through the exact Windows file handle used for removal. This closes
+  the path replacement window between validation and deletion on Windows.
+- Vault payloads inherit a current-user execute deny and restricted ACL. Local
+  administrators and Local System retain recovery access. Non-Windows builds do
+  not provide the same handle-deletion or Windows ACL guarantees.
+- Restore verifies payload integrity, refuses overwrite, rejects reparse-point
+  destination segments, and records a pending state so a completed copy can be
+  reconciled after interruption.
+- Vault metadata is structured and atomically replaced but is not signed. ACLs
+  reduce accidental or unprivileged modification; they do not make the vault
+  trustworthy after administrator compromise.
 - A repeated hash import updates its stored source metadata. Source trust and
   multi-source consensus are intentionally deferred until threat-intelligence
   integration.
@@ -368,7 +436,19 @@ a clean-file verdict.
 - [x] Added human and JSON Lines output, correlated logs, and opt-in history capture.
 - [x] Added event, overflow, exclusion, cancellation, CLI, and live watcher tests.
 
-The next milestone is safe quarantine and recovery. It must revalidate file
-identity at the point of action, use a restricted non-executable store, preserve
-metadata needed for restoration, and avoid permanent deletion until recovery
-semantics and tamper resistance are tested.
+### Milestone 7 — Safe quarantine and recovery
+
+- [x] Added storage-neutral quarantine, entry, result, and restoration contracts.
+- [x] Required completed detector evidence, expected SHA-256, and expected length.
+- [x] Revalidated and removed the exact opened Windows file handle.
+- [x] Added a restricted vault with inherited execute denial and `.uaq` payloads.
+- [x] Flushed payload and atomic metadata before removing the source.
+- [x] Verified payload integrity and refused destination overwrite during restore.
+- [x] Added pending-restore reconciliation for interruption recovery.
+- [x] Added add, list, show, and restore CLI workflows with JSON and exit codes.
+- [x] Added ACL, corruption, identity-race, overwrite, recovery, and live CLI tests.
+
+The next milestone should turn UtoAegis into a supervised Windows background
+service with an explicit response policy and notification boundary. Monitoring
+must remain observe-only by default; any automatic quarantine mode needs policy
+configuration, allowlists, rate limits, and an operator-visible recovery path.

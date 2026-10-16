@@ -611,3 +611,142 @@ Design safe quarantine and recovery. Quarantine must revalidate identity at the
 point of action, move content into a restricted non-executable store, retain
 tamper-resistant metadata for restoration, prevent path traversal and overwrite
 on recovery, and remain opt-in until rollback behavior is proven.
+
+## 2026-10-16 — Milestone 7: safe quarantine and recovery
+
+### Goal
+
+Add an explicit, reversible response to confirmed local detections without
+turning monitoring into automatic deletion. Revalidate the file at the moment
+of action, isolate it in a restricted non-executable vault, and make restoration
+integrity and overwrite behavior predictable.
+
+### Design and data flow
+
+- `IQuarantineStore` separates response orchestration from the filesystem vault.
+- `QuarantineRequest` requires a normalized expected SHA-256, expected length,
+  and at least one bounded detection-evidence value.
+- `quarantine add` performs the existing complete composite scan first. It
+  refuses to act without `--database`, `--signatures`, or both, and it does not
+  quarantine an unknown or no-match result.
+- On Windows, the vault opens the source with read and delete access while
+  denying new write and delete sharing. SHA-256 and length are recomputed from
+  that exact handle and compared with the completed scan result.
+- The verified handle is rewound and copied into a unique vault entry. The
+  payload is flushed to disk, named `payload.uaq`, marked hidden and read-only,
+  and accompanied by atomically replaced JSON recovery metadata.
+- Only after payload and metadata succeed is the opened source handle marked
+  for deletion. A failure before that point preserves the original.
+- Vault ACL inheritance is disabled on Windows. The current user, Local System,
+  and administrators receive recovery access, while inherited files explicitly
+  deny execution to the current user.
+- Restore recomputes the payload hash and length, requires an existing ordinary
+  destination directory, rejects reparse-point path segments, copies through a
+  flushed temporary file, and uses a non-overwriting final move.
+- Metadata enters `RestorePending` before the final move. If the process stops
+  after the move, a later restore verifies the destination and finalizes the
+  `Restored` state rather than overwriting it.
+
+```text
+detected scan -> expected identity -> reopen exact handle -> re-hash
+                                                       -> flush .uaq payload
+                                                       -> atomic metadata
+                                                       -> delete opened handle
+
+active entry -> verify payload -> pending metadata -> no-overwrite move
+                                                -> restored metadata
+```
+
+### CLI and exit behavior
+
+- `quarantine add --vault <path>` scans and conditionally isolates one file.
+- `quarantine list` returns newest entries first with a maximum of 200 results.
+- `quarantine show` displays identity, evidence, timestamps, and restore state.
+- `quarantine restore` uses the original path by default or an explicit
+  `--destination`; both must be absent before a new restore begins.
+- Human and JSON output are supported. Scan, quarantine, and restore operations
+  produce correlated structured logs unless `--quiet` is supplied.
+- Exit code `14` means a detection was successfully quarantined. Code `15`
+  represents quarantine or vault-management failure. Code `16` means restore
+  failed or was safely refused. An already-restored entry is idempotent success.
+- Optional scan history is written before quarantine. If quarantine succeeds
+  but requested history storage failed, the existing combined code `12` retains
+  both the detection and audit failure signal.
+
+### Security and recovery review
+
+- Exact-handle hashing and deletion on Windows prevents a path swap between the
+  final identity check and source removal. An already-open incompatible handle
+  causes quarantine to fail rather than weakening sharing rules.
+- The payload is retained after restoration. This supports evidence and repeated
+  integrity checks, but consumes storage and requires a future reviewed purge
+  policy.
+- Restore never overwrites. A user or attacker placing any destination entry
+  first causes a visible refusal. Pending-state reconciliation accepts an
+  existing destination only when its complete hash and length match the payload.
+- A process stop after committed quarantine metadata but before handle deletion
+  can leave both the source and an active vault copy. This is a safe duplicate,
+  not data loss, but there is not yet a repair command for that state.
+- The JSON manifest is bounded and validated but not signed, chained, or
+  encrypted. Payload hashing detects content corruption; it does not prove
+  metadata provenance after a privileged attacker changes the vault.
+- ACLs restrict ordinary access and deny current-user execution. Administrators
+  and Local System necessarily retain control. Host compromise at that level is
+  outside the vault's trust boundary.
+- Non-Windows fallback behavior exists for development compatibility but cannot
+  provide the same Windows handle and ACL guarantees. UtoAegis remains a Windows
+  endpoint-security project.
+- Quarantine remains manual. Monitor detections do not trigger removal, which
+  prevents a false-positive rule from causing unattended disruption.
+
+### Verification
+
+- Release build completed on .NET 10 with zero warnings and zero errors.
+- All 153 automated tests passed: 71 core, 47 infrastructure, and 35 CLI tests.
+- NuGet reported no known vulnerable direct or transitive packages after adding
+  the official filesystem access-control package.
+- Contract tests cover hash, path, evidence, and state-transition validation.
+- Real vault tests cover protected ACLs, inherited execute denial, exact-handle
+  source removal, identity mismatch, payload corruption, overwrite refusal,
+  deterministic listing, round-trip restoration, and interrupted-restore
+  reconciliation.
+- CLI tests cover subcommands, detector and vault requirements, option scope,
+  canonical IDs, list limits, and distinct quarantine and restore exit codes.
+- An end-to-end harmless-fixture test ran `add`, `list`, `show`, `restore`, and a
+  second idempotent restore. It returned code `14`, removed only the copied test
+  source, preserved SHA-256 after recovery, and cleaned its isolated test vault.
+
+### Known limitations
+
+- There is no automatic vault size limit, quota, age-based retention, or purge
+  command. Listing is bounded, but payload storage must be monitored externally.
+- Quarantine evidence stores bounded detector identifiers rather than a complete
+  scan record. Use `--history` when the full scan result must be retained.
+- Vault metadata and payloads are not encrypted or cryptographically signed.
+- An interrupted quarantine can leave an orphan entry directory without metadata
+  or a safe duplicate when metadata committed before source removal.
+- Restore requires the destination parent directory to already exist and does
+  not recreate deleted directory trees or original ACLs.
+- Original last-write time is restored; creation time, alternate data streams,
+  ownership, detailed ACLs, and other filesystem metadata are not preserved.
+- The monitor, background service, policy engine, allowlists, and notifications
+  are not connected to quarantine.
+
+### Definition of done
+
+- [x] Quarantine and recovery are behind a storage-neutral contract.
+- [x] Only a completed configured detection can authorize quarantine through the CLI.
+- [x] Source identity is rechecked through the Windows handle used for removal.
+- [x] Payload and metadata are durable before the source is removed.
+- [x] The Windows vault restricts access and denies current-user payload execution.
+- [x] Restore verifies integrity, rejects links and overwrites, and recovers pending state.
+- [x] Human, JSON, logging, history, and exit-code behavior are integrated.
+- [x] Failure, corruption, interruption, ACL, and live round-trip paths are tested.
+
+### Next milestone
+
+Build a supervised Windows service and explicit response-policy boundary. The
+service should run monitoring with least practical privilege, expose health and
+detection notifications, and remain observe-only by default. Any automatic
+quarantine policy must add allowlists, rate limits, dry-run behavior, and clear
+operator recovery before it can be enabled.
