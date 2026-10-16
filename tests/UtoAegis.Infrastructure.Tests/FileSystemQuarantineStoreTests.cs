@@ -1,4 +1,7 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Runtime.Versioning;
 using System.Text.Json.Nodes;
 using UtoAegis.Core.Quarantine;
 using UtoAegis.Infrastructure.Quarantine;
@@ -83,6 +86,10 @@ public sealed class FileSystemQuarantineStoreTests
             "payload.uaq");
         Assert.IsTrue(File.Exists(payloadPath));
         Assert.IsTrue((File.GetAttributes(payloadPath) & FileAttributes.ReadOnly) != 0);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.IsTrue(HasCurrentUserExecuteDeny(payloadPath));
+        }
 
         var restored = await store.RestoreAsync(quarantined.Entry.Id);
 
@@ -216,4 +223,18 @@ public sealed class FileSystemQuarantineStoreTests
             Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant(),
             content.LongLength,
             ["signature:demo"]);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasCurrentUserExecuteDeny(string path)
+    {
+        var currentUser = WindowsIdentity.GetCurrent().User!;
+        var rules = new FileInfo(path)
+            .GetAccessControl()
+            .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>();
+        return rules.Any(rule =>
+            rule.IdentityReference == currentUser &&
+            rule.AccessControlType == AccessControlType.Deny &&
+            (rule.FileSystemRights & FileSystemRights.ExecuteFile) != 0);
+    }
 }

@@ -596,6 +596,12 @@ public sealed class FileSystemQuarantineStore : IQuarantineStore, IDisposable
         var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
         security.AddAccessRule(new FileSystemAccessRule(
             currentUser,
+            FileSystemRights.ExecuteFile,
+            InheritanceFlags.ObjectInherit,
+            PropagationFlags.InheritOnly,
+            AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            currentUser,
             FileSystemRights.FullControl,
             inheritance,
             PropagationFlags.None,
