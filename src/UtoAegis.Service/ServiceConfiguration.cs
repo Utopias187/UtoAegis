@@ -149,7 +149,30 @@ public sealed class ServiceConfiguration
                     "to preserve least privilege and prevent monitoring loops.");
             }
 
-            if (IsWithin(monitorRoot, Path.GetFullPath(baseDirectory)))
+            var writableDirectories = writablePaths
+                .Select(path => path == vaultPath ? path : Path.GetDirectoryName(path)!)
+                .Distinct(OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal)
+                .ToArray();
+            var installationDirectory = Path.GetFullPath(baseDirectory);
+            if (writableDirectories.Any(directory =>
+                    PathEquals(directory, Path.GetPathRoot(directory)!) ||
+                    IsWithin(directory, installationDirectory)))
+            {
+                throw new ServiceConfigurationException(
+                    "Writable state directories must not be filesystem roots or contain " +
+                    "the service installation directory.");
+            }
+
+            if (signaturePath is not null &&
+                writableDirectories.Any(directory => IsWithin(directory, signaturePath)))
+            {
+                throw new ServiceConfigurationException(
+                    "SignaturePath must be outside writable state directories.");
+            }
+
+            if (IsWithin(monitorRoot, installationDirectory))
             {
                 throw new ServiceConfigurationException(
                     "The service installation directory must be outside MonitorRoot.");
@@ -357,4 +380,12 @@ public sealed class ServiceConfiguration
              !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
              !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal));
     }
+
+    private static bool PathEquals(string first, string second) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(first),
+            Path.TrimEndingDirectorySeparator(second),
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
 }

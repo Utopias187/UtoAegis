@@ -35,13 +35,13 @@ public sealed class ServiceConfigurationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db"
+            ["UtoAegis:DatabasePath"] = "state/reputation.db"
         });
 
         var result = ServiceConfiguration.Load(configuration, testDirectory);
 
         Assert.AreEqual(ResponseMode.ObserveOnly, result.ResponsePolicy.Mode);
-        Assert.AreEqual(Path.Combine(testDirectory, "reputation.db"), result.DatabasePath);
+        Assert.AreEqual(Path.Combine(testDirectory, "state", "reputation.db"), result.DatabasePath);
         Assert.IsTrue(result.Recursive);
         Assert.IsTrue(result.RunInitialScan);
     }
@@ -52,7 +52,7 @@ public sealed class ServiceConfigurationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:Response:Mode"] = "Quarantine"
         });
 
@@ -68,7 +68,7 @@ public sealed class ServiceConfigurationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:VaultPath"] = Path.Combine(monitorRoot, "vault")
         });
 
@@ -94,6 +94,41 @@ public sealed class ServiceConfigurationTests
     }
 
     [TestMethod]
+    public void Load_SignatureInsideWritableStateDirectory_Throws()
+    {
+        var stateDirectory = Path.Combine(testDirectory, "state");
+        Directory.CreateDirectory(stateDirectory);
+        var signaturePath = Path.Combine(stateDirectory, "signatures.jsonl");
+        File.WriteAllText(signaturePath, "{}\n");
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:DatabasePath"] = Path.Combine(stateDirectory, "reputation.db"),
+            ["UtoAegis:SignaturePath"] = signaturePath
+        });
+
+        var exception = Assert.ThrowsExactly<ServiceConfigurationException>(() =>
+            ServiceConfiguration.Load(configuration, testDirectory));
+
+        StringAssert.Contains(exception.Message, "outside writable state directories");
+    }
+
+    [TestMethod]
+    public void Load_WritableInstallationDirectory_Throws()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:DatabasePath"] = Path.Combine(testDirectory, "reputation.db")
+        });
+
+        var exception = Assert.ThrowsExactly<ServiceConfigurationException>(() =>
+            ServiceConfiguration.Load(configuration, testDirectory));
+
+        StringAssert.Contains(exception.Message, "installation directory");
+    }
+
+    [TestMethod]
     public void Load_WithoutDetectionSource_Throws()
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
@@ -113,7 +148,7 @@ public sealed class ServiceConfigurationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:VaultPath"] = "vault",
             ["UtoAegis:Response:Mode"] = "DryRunQuarantine",
             ["UtoAegis:Response:AllowlistedPathPrefixes:0"] = monitorRoot,
@@ -137,7 +172,7 @@ public sealed class ServiceConfigurationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:HealthIntervalSeconds"] = "1"
         });
 
@@ -151,13 +186,13 @@ public sealed class ServiceConfigurationTests
         var invalidQueue = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:QueueCapacity"] = "0"
         });
         var invalidConcurrency = BuildConfiguration(new Dictionary<string, string?>
         {
             ["UtoAegis:MonitorRoot"] = monitorRoot,
-            ["UtoAegis:DatabasePath"] = "reputation.db",
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
             ["UtoAegis:MaximumConcurrency"] = "100"
         });
 
