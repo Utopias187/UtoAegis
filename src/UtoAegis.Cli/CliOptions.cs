@@ -11,7 +11,11 @@ internal enum CliCommand
     ImportHashes,
     HistoryList,
     HistoryShow,
-    HistoryPrune
+    HistoryPrune,
+    QuarantineAdd,
+    QuarantineList,
+    QuarantineShow,
+    QuarantineRestore
 }
 
 internal sealed record CliOptions(
@@ -20,6 +24,8 @@ internal sealed record CliOptions(
     string? DatabasePath,
     string? SignaturePath,
     string? HistoryPath,
+    string? VaultPath,
+    string? DestinationPath,
     bool Recursive,
     int MaximumConcurrency,
     int DebounceMilliseconds,
@@ -89,6 +95,34 @@ internal sealed record CliOptions(
 
             index = 2;
         }
+        else if (args.Length > 0 && args[0] == "quarantine")
+        {
+            if (args.Length < 2)
+            {
+                return Fail(
+                    "quarantine requires a subcommand: add, list, show, or restore.",
+                    out options,
+                    out error);
+            }
+
+            command = args[1] switch
+            {
+                "add" => CliCommand.QuarantineAdd,
+                "list" => CliCommand.QuarantineList,
+                "show" => CliCommand.QuarantineShow,
+                "restore" => CliCommand.QuarantineRestore,
+                _ => (CliCommand)(-1)
+            };
+            if ((int)command == -1)
+            {
+                return Fail(
+                    $"Unknown quarantine subcommand: {args[1]}",
+                    out options,
+                    out error);
+            }
+
+            index = 2;
+        }
 
         var json = false;
         var quiet = false;
@@ -108,6 +142,8 @@ internal sealed record CliOptions(
         string? databasePath = null;
         string? signaturePath = null;
         string? historyPath = null;
+        string? vaultPath = null;
+        string? destinationPath = null;
         string? inputPath = null;
 
         while (index < args.Length)
@@ -149,6 +185,41 @@ internal sealed record CliOptions(
                 }
 
                 historyPath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--vault")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--vault requires a path.", out options, out error);
+                }
+
+                if (vaultPath is not null)
+                {
+                    return Fail("--vault may only be supplied once.", out options, out error);
+                }
+
+                vaultPath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--destination")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--destination requires a path.", out options, out error);
+                }
+
+                if (destinationPath is not null)
+                {
+                    return Fail(
+                        "--destination may only be supplied once.",
+                        out options,
+                        out error);
+                }
+
+                destinationPath = args[index++];
                 continue;
             }
 
@@ -351,7 +422,10 @@ internal sealed record CliOptions(
             CliCommand.ScanDirectory or
             CliCommand.Monitor or
             CliCommand.ImportHashes or
-            CliCommand.HistoryShow;
+            CliCommand.HistoryShow or
+            CliCommand.QuarantineAdd or
+            CliCommand.QuarantineShow or
+            CliCommand.QuarantineRestore;
         if (!showHelp && requiresInput && inputPath is null)
         {
             var inputName = command switch
@@ -360,6 +434,8 @@ internal sealed record CliOptions(
                 CliCommand.ScanDirectory => "directory",
                 CliCommand.Monitor => "directory",
                 CliCommand.ImportHashes => "JSON Lines import file",
+                CliCommand.QuarantineAdd => "file",
+                CliCommand.QuarantineShow or CliCommand.QuarantineRestore => "quarantine ID",
                 _ => "scan ID"
             };
             return Fail($"A {inputName} path is required.", out options, out error);
@@ -378,7 +454,7 @@ internal sealed record CliOptions(
         if (!showHelp && command == CliCommand.ImportHashes && signaturePath is not null)
         {
             return Fail(
-                "--signatures is only valid with scan, scan-directory, or monitor.",
+                "--signatures is only valid with scan, scan-directory, monitor, or quarantine add.",
                 out options,
                 out error);
         }
@@ -386,7 +462,7 @@ internal sealed record CliOptions(
         if (!showHelp && command == CliCommand.ImportHashes && historyPath is not null)
         {
             return Fail(
-                "--history is only valid with scans or history commands.",
+                "--history is only valid with scans, quarantine add, or history commands.",
                 out options,
                 out error);
         }
@@ -401,6 +477,42 @@ internal sealed record CliOptions(
         {
             return Fail(
                 "--database and --signatures are not valid with history commands.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && IsQuarantineCommand(command) && vaultPath is null)
+        {
+            return Fail("Quarantine commands require --vault <path>.", out options, out error);
+        }
+
+        if (!showHelp && !IsQuarantineCommand(command) && vaultPath is not null)
+        {
+            return Fail("--vault is only valid with quarantine commands.", out options, out error);
+        }
+
+        if (!showHelp && command != CliCommand.QuarantineRestore && destinationPath is not null)
+        {
+            return Fail(
+                "--destination is only valid with quarantine restore.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command == CliCommand.QuarantineAdd &&
+            databasePath is null && signaturePath is null)
+        {
+            return Fail(
+                "quarantine add requires --database, --signatures, or both.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && IsQuarantineManagementCommand(command) &&
+            (databasePath is not null || signaturePath is not null || historyPath is not null))
+        {
+            return Fail(
+                "Scan database, signature, and history options are not valid with quarantine management commands.",
                 out options,
                 out error);
         }
@@ -433,9 +545,13 @@ internal sealed record CliOptions(
             return Fail("--queue-capacity is only valid with monitor.", out options, out error);
         }
 
-        if (!showHelp && command != CliCommand.HistoryList && historyLimitSpecified)
+        if (!showHelp && command is not (CliCommand.HistoryList or CliCommand.QuarantineList) &&
+            historyLimitSpecified)
         {
-            return Fail("--limit is only valid with history list.", out options, out error);
+            return Fail(
+                "--limit is only valid with history list or quarantine list.",
+                out options,
+                out error);
         }
 
         if (!showHelp && command != CliCommand.HistoryPrune && olderThanDays is not null)
@@ -469,12 +585,29 @@ internal sealed record CliOptions(
                 .ToString("D", CultureInfo.InvariantCulture);
         }
 
+        if (!showHelp && command is CliCommand.QuarantineShow or CliCommand.QuarantineRestore &&
+            !Guid.TryParseExact(inputPath, "D", out _))
+        {
+            return Fail(
+                "quarantine show and restore require an ID in canonical GUID format.",
+                out options,
+                out error);
+        }
+
+        if (!showHelp && command is CliCommand.QuarantineShow or CliCommand.QuarantineRestore)
+        {
+            inputPath = Guid.ParseExact(inputPath!, "D")
+                .ToString("D", CultureInfo.InvariantCulture);
+        }
+
         options = new CliOptions(
             command,
             inputPath,
             databasePath,
             signaturePath,
             historyPath,
+            vaultPath,
+            destinationPath,
             recursive,
             maximumConcurrency,
             debounceMilliseconds,
@@ -490,6 +623,17 @@ internal sealed record CliOptions(
 
     private static bool IsHistoryCommand(CliCommand command) =>
         command is CliCommand.HistoryList or CliCommand.HistoryShow or CliCommand.HistoryPrune;
+
+    private static bool IsQuarantineCommand(CliCommand command) =>
+        command is CliCommand.QuarantineAdd or
+            CliCommand.QuarantineList or
+            CliCommand.QuarantineShow or
+            CliCommand.QuarantineRestore;
+
+    private static bool IsQuarantineManagementCommand(CliCommand command) =>
+        command is CliCommand.QuarantineList or
+            CliCommand.QuarantineShow or
+            CliCommand.QuarantineRestore;
 
     private static bool Fail(
         string message,

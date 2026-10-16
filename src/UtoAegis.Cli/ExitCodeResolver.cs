@@ -53,6 +53,10 @@ internal static class ExitCodeResolver
     {
         CliCommand.ScanDirectory => ExitCodes.DirectoryScanFailed,
         CliCommand.Monitor => ExitCodes.MonitorFailed,
+        CliCommand.QuarantineAdd or
+            CliCommand.QuarantineList or
+            CliCommand.QuarantineShow => ExitCodes.QuarantineFailed,
+        CliCommand.QuarantineRestore => ExitCodes.RestoreFailed,
         CliCommand.Scan => ExitCodes.ScanFailed,
         CliCommand.ImportHashes => ExitCodes.ImportFailed,
         _ => ExitCodes.HistoryStoreFailed

@@ -15,5 +15,8 @@ internal static class ExitCodes
     public const int ThreatDetectedWithPartialResults = 11;
     public const int ThreatDetectedWithHistoryFailure = 12;
     public const int MonitorFailed = 13;
+    public const int Quarantined = 14;
+    public const int QuarantineFailed = 15;
+    public const int RestoreFailed = 16;
     public const int Cancelled = 130;
 }

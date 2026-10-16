@@ -53,7 +53,7 @@ public sealed class CliOptionsTests
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
         Assert.AreEqual(
-            "--signatures is only valid with scan, scan-directory, or monitor.",
+            "--signatures is only valid with scan, scan-directory, monitor, or quarantine add.",
             error);
     }
 
@@ -336,7 +336,106 @@ public sealed class CliOptionsTests
         Assert.IsFalse(parsed);
         Assert.IsNull(options);
         Assert.AreEqual(
-            "--history is only valid with scans or history commands.",
+            "--history is only valid with scans, quarantine add, or history commands.",
+            error);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineAdd_ReturnsDetectorAndVaultOptions()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "quarantine", "add", "--vault", "vault", "--signatures", "rules.jsonl",
+                "--history", "history.db", "sample.bin"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.QuarantineAdd, options.Command);
+        Assert.AreEqual("vault", options.VaultPath);
+        Assert.AreEqual("rules.jsonl", options.SignaturePath);
+        Assert.AreEqual("history.db", options.HistoryPath);
+        Assert.AreEqual("sample.bin", options.InputPath);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineAddWithoutDetector_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["quarantine", "add", "--vault", "vault", "sample.bin"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual(
+            "quarantine add requires --database, --signatures, or both.",
+            error);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineList_ReturnsLimit()
+    {
+        var parsed = CliOptions.TryParse(
+            ["quarantine", "list", "--vault", "vault", "--limit", "10"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.QuarantineList, options.Command);
+        Assert.AreEqual(10, options.HistoryLimit);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineRestore_ReturnsDestination()
+    {
+        var id = Guid.NewGuid().ToString("D");
+        var parsed = CliOptions.TryParse(
+            [
+                "quarantine", "restore", "--vault", "vault", "--destination",
+                "restored.bin", id
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.QuarantineRestore, options.Command);
+        Assert.AreEqual("restored.bin", options.DestinationPath);
+        Assert.AreEqual(id, options.InputPath);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineCommandWithoutVault_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["quarantine", "list"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual("Quarantine commands require --vault <path>.", error);
+    }
+
+    [TestMethod]
+    public void TryParse_QuarantineManagementWithScanOptions_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["quarantine", "list", "--vault", "vault", "--database", "reputation.db"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        Assert.AreEqual(
+            "Scan database, signature, and history options are not valid with quarantine management commands.",
             error);
     }
 }

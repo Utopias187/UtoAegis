@@ -3,12 +3,14 @@ using System.Text.Json.Nodes;
 using UtoAegis.Cli;
 using UtoAegis.Core.History;
 using UtoAegis.Core.Monitoring;
+using UtoAegis.Core.Quarantine;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
 using UtoAegis.Infrastructure.Importing;
 using UtoAegis.Infrastructure.History;
 using UtoAegis.Infrastructure.Monitoring;
+using UtoAegis.Infrastructure.Quarantine;
 using UtoAegis.Infrastructure.Reputation;
 using UtoAegis.Infrastructure.Signatures;
 
@@ -43,6 +45,10 @@ try
         CliCommand.HistoryList => await HistoryCommandRunner.ListAsync(options, cancellation.Token),
         CliCommand.HistoryShow => await HistoryCommandRunner.ShowAsync(options, cancellation.Token),
         CliCommand.HistoryPrune => await HistoryCommandRunner.PruneAsync(options, cancellation.Token),
+        CliCommand.QuarantineAdd => await RunQuarantineAddAsync(options, cancellation.Token),
+        CliCommand.QuarantineList => await QuarantineCommandRunner.ListAsync(options, cancellation.Token),
+        CliCommand.QuarantineShow => await QuarantineCommandRunner.ShowAsync(options, cancellation.Token),
+        CliCommand.QuarantineRestore => await QuarantineCommandRunner.RestoreAsync(options, cancellation.Token),
         _ => ExitCodes.UsageError
     };
 }
@@ -72,6 +78,11 @@ catch (ScanHistoryStoreException exception)
 {
     Console.Error.WriteLine($"Scan history error: {exception.Message}");
     return ExitCodes.HistoryStoreFailed;
+}
+catch (QuarantineStoreException exception)
+{
+    Console.Error.WriteLine($"Quarantine vault error: {exception.Message}");
+    return ExitCodeResolver.ForOperationFailure(options.Command);
 }
 catch (ArgumentException exception)
 {
@@ -174,6 +185,161 @@ static async Task<int> RunDirectoryScanAsync(
     return history.Requested && !history.Stored
         ? ExitCodeResolver.ForHistoryWriteFailure(result.HasDetections)
         : ExitCodeResolver.ForDirectory(result);
+}
+
+static async Task<int> RunQuarantineAddAsync(
+    CliOptions options,
+    CancellationToken cancellationToken)
+{
+    var scanId = Guid.NewGuid();
+    var startedUtc = DateTimeOffset.UtcNow;
+    var historyStore = await CreateHistoryStoreAsync(options, cancellationToken);
+    if (!options.Quiet)
+    {
+        JsonLogWriter.ScanStarted(scanId, options.InputPath!);
+    }
+
+    var scanner = await CreateFileScannerAsync(options, scanId, cancellationToken);
+    var result = await scanner.ScanAsync(options.InputPath!, cancellationToken);
+    var completedUtc = DateTimeOffset.UtcNow;
+    if (!options.Quiet)
+    {
+        JsonLogWriter.ScanFinished(scanId, result.FileHash, result.Reputation);
+        if (result.Signatures is not null)
+        {
+            JsonLogWriter.SignatureScanFinished(scanId, result.Signatures);
+        }
+    }
+
+    var history = await PersistHistoryAsync(
+        options,
+        historyStore,
+        ScanHistoryRecord.FromFileScan(
+            scanId,
+            options.InputPath!,
+            startedUtc,
+            completedUtc,
+            result),
+        cancellationToken);
+
+    if (!result.IsCompleted || !result.IsDetected)
+    {
+        WriteQuarantineAddResult(options, scanId, result, history, quarantine: null);
+        if (history.Requested && !history.Stored)
+        {
+            return ExitCodeResolver.ForHistoryWriteFailure(result.IsDetected);
+        }
+
+        return ExitCodeResolver.ForFile(result);
+    }
+
+    using var store = new FileSystemQuarantineStore(options.VaultPath!);
+    await store.InitializeAsync(cancellationToken);
+    var evidence = CreateQuarantineEvidence(result);
+    var quarantine = await store.QuarantineAsync(
+        new QuarantineRequest(
+            result.FileHash.Path!,
+            result.FileHash.Sha256!,
+            result.FileHash.FileSizeBytes!.Value,
+            evidence),
+        cancellationToken);
+    if (!options.Quiet)
+    {
+        JsonLogWriter.QuarantineFinished(scanId, quarantine);
+    }
+
+    WriteQuarantineAddResult(options, scanId, result, history, quarantine);
+
+    if (!quarantine.IsSuccess)
+    {
+        return ExitCodes.QuarantineFailed;
+    }
+
+    return history.Requested && !history.Stored
+        ? ExitCodes.ThreatDetectedWithHistoryFailure
+        : ExitCodes.Quarantined;
+}
+
+static IReadOnlyCollection<string> CreateQuarantineEvidence(FileScanResult result)
+{
+    var evidence = new List<string>();
+    if (result.Reputation?.Status == HashReputationStatus.Malicious)
+    {
+        evidence.Add("hash-reputation");
+    }
+
+    var ruleIds = result.Signatures?.Matches
+        .Select(match => match.RuleId)
+        .Distinct(StringComparer.Ordinal)
+        .Order(StringComparer.Ordinal)
+        .ToArray() ?? [];
+    var availableRuleSlots = QuarantineRequest.MaximumEvidenceCount - evidence.Count;
+    var includeSummary = ruleIds.Length > availableRuleSlots;
+    if (includeSummary)
+    {
+        availableRuleSlots--;
+    }
+
+    evidence.AddRange(ruleIds
+        .Take(availableRuleSlots)
+        .Select(ruleId => $"signature:{ruleId}"));
+    if (includeSummary)
+    {
+        evidence.Add($"signature-match-count:{ruleIds.Length}");
+    }
+
+    return evidence;
+}
+
+static void WriteQuarantineAddResult(
+    CliOptions options,
+    Guid scanId,
+    FileScanResult scan,
+    HistoryPersistenceResult history,
+    QuarantineOperationResult? quarantine)
+{
+    if (options.Json)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            new
+            {
+                status = quarantine?.Status.ToString() ??
+                    (scan.IsDetected ? "ScanFailed" : "NotDetected"),
+                scanId,
+                scan = CreateFileScanPayload(scan),
+                history = CreateHistoryPersistencePayload(history),
+                quarantine = quarantine is null
+                    ? null
+                    : new
+                    {
+                        status = quarantine.Status.ToString(),
+                        entry = quarantine.Entry is null
+                            ? null
+                            : QuarantineCommandRunner.CreateEntryPayload(quarantine.Entry),
+                        error = quarantine.ErrorMessage
+                    }
+            },
+            CliJson.ResultOptions));
+        return;
+    }
+
+    WriteHumanFileDetails(scan);
+    WriteHumanHistoryStatus(scanId, history);
+    if (quarantine?.IsSuccess == true)
+    {
+        Console.WriteLine(
+            $"Quarantined as {quarantine.Entry!.Id:D} in " +
+            $"{Path.GetFullPath(options.VaultPath!)}.");
+    }
+    else if (quarantine is not null)
+    {
+        Console.Error.WriteLine(
+            $"Quarantine failed ({quarantine.Status}): {quarantine.ErrorMessage}");
+    }
+    else if (!scan.IsDetected)
+    {
+        Console.WriteLine("The file was not quarantined because no configured detector matched.");
+    }
 }
 
 static async Task<int> RunMonitorAsync(
@@ -712,6 +878,10 @@ static void PrintUsage()
           utoaegis [scan] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <file>
           utoaegis scan-directory [--recursive] [--max-concurrency <1-32>] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <directory>
           utoaegis monitor [--recursive] [--max-concurrency <1-32>] [--debounce-ms <0-60000>] [--queue-capacity <1-65536>] [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <directory>
+          utoaegis quarantine add --vault <path> [--database <path>] [--signatures <path>] [--history <path>] [--json] [--quiet] [--] <file>
+          utoaegis quarantine list --vault <path> [--limit <1-200>] [--json]
+          utoaegis quarantine show --vault <path> [--json] <quarantine-id>
+          utoaegis quarantine restore --vault <path> [--destination <path>] [--json] <quarantine-id>
           utoaegis import-hashes --database <path> [--json] [--quiet] <indicators.jsonl>
           utoaegis history list --history <path> [--limit <1-200>] [--json]
           utoaegis history show --history <path> [--json] <scan-id>
@@ -721,6 +891,10 @@ static void PrintUsage()
           scan            Calculate SHA-256 and optionally run reputation and signature checks.
           scan-directory  Scan each regular file in a directory without following reparse points.
           monitor         Watch a directory and scan changed files until Ctrl+C is pressed.
+          quarantine add  Scan and quarantine a file only when a configured detector matches.
+          quarantine list List recent entries in a restricted quarantine vault.
+          quarantine show Show one quarantine entry and its detection evidence.
+          quarantine restore  Restore an entry without overwriting an existing file.
           import-hashes   Validate and transactionally import JSON Lines indicators.
           history list    List recent stored scan summaries, newest first.
           history show    Show one complete stored scan record.
@@ -734,6 +908,8 @@ static void PrintUsage()
           --database         SQLite reputation database path.
           --signatures       JSON Lines exact-byte signature rule file.
           --history          Separate SQLite database for opt-in scan history.
+          --vault            Restricted quarantine vault directory.
+          --destination      Optional nonexisting path for quarantine restore.
           --limit            Maximum history summaries to list; default 25, maximum 200.
           --older-than-days  Delete history older than this many days.
           --json             Emit the result as JSON.

@@ -81,6 +81,17 @@ public sealed class ExitCodeResolverTests
             ExitCodeResolver.ForOperationFailure(CliCommand.Monitor));
     }
 
+    [TestMethod]
+    public void ForOperationFailure_QuarantineAndRestore_ReturnDistinctFailures()
+    {
+        Assert.AreEqual(
+            ExitCodes.QuarantineFailed,
+            ExitCodeResolver.ForOperationFailure(CliCommand.QuarantineAdd));
+        Assert.AreEqual(
+            ExitCodes.RestoreFailed,
+            ExitCodeResolver.ForOperationFailure(CliCommand.QuarantineRestore));
+    }
+
     private static DirectoryScanResult FinishedDirectory(
         FileScanResult file,
         IReadOnlyList<DirectoryScanIssue> issues) =>

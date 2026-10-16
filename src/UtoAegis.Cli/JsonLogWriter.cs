@@ -1,6 +1,7 @@
 using System.Text.Json;
 using UtoAegis.Core.History;
 using UtoAegis.Core.Monitoring;
+using UtoAegis.Core.Quarantine;
 using UtoAegis.Core.Reputation;
 using UtoAegis.Core.Scanning;
 using UtoAegis.Core.Signatures;
@@ -260,6 +261,41 @@ internal static class JsonLogWriter
             level = "information",
             eventName = "file_monitor_cancelled",
             sessionId
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void QuarantineFinished(Guid scanId, QuarantineOperationResult result)
+    {
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = result.IsSuccess ? "information" : "warning",
+            eventName = result.IsSuccess ? "file_quarantined" : "file_quarantine_failed",
+            scanId,
+            quarantineId = result.Entry?.Id,
+            status = result.Status.ToString(),
+            path = result.Entry?.OriginalPath,
+            result.ErrorMessage
+        };
+
+        Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
+    }
+
+    public static void RestoreFinished(Guid quarantineId, RestoreOperationResult result)
+    {
+        var succeeded = result.Status is RestoreOperationStatus.Restored or
+            RestoreOperationStatus.AlreadyRestored;
+        var logEntry = new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            level = succeeded ? "information" : "warning",
+            eventName = succeeded ? "quarantine_restore_completed" : "quarantine_restore_failed",
+            quarantineId,
+            status = result.Status.ToString(),
+            result.DestinationPath,
+            result.ErrorMessage
         };
 
         Console.Error.WriteLine(JsonSerializer.Serialize(logEntry, SerializerOptions));
