@@ -2,7 +2,9 @@
   <Project Path="src/UtoAegis.Core/UtoAegis.Core.csproj" />
   <Project Path="src/UtoAegis.Infrastructure/UtoAegis.Infrastructure.csproj" />
   <Project Path="src/UtoAegis.Cli/UtoAegis.Cli.csproj" />
+  <Project Path="src/UtoAegis.Service/UtoAegis.Service.csproj" />
   <Project Path="tests/UtoAegis.Core.Tests/UtoAegis.Core.Tests.csproj" />
   <Project Path="tests/UtoAegis.Infrastructure.Tests/UtoAegis.Infrastructure.Tests.csproj" />
   <Project Path="tests/UtoAegis.Cli.Tests/UtoAegis.Cli.Tests.csproj" />
+  <Project Path="tests/UtoAegis.Service.Tests/UtoAegis.Service.Tests.csproj" />
 </Solution>
