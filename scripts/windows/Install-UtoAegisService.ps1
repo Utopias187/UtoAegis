@@ -126,7 +126,7 @@ try {
         'error=' 'normal' 'obj=' $serviceIdentity 'DisplayName=' 'UtoAegis Endpoint Monitor'
     $created = $true
     Invoke-Sc description $ServiceName 'Supervised UtoAegis file monitoring and detection response.'
-    Invoke-Sc failure $ServiceName 'reset=' '86400' 'actions=' 'restart/60000/restart/60000/""/0'
+    Invoke-Sc failure $ServiceName 'reset=' '86400' 'actions=' 'restart/60000/restart/60000'
     Invoke-Sc failureflag $ServiceName '1'
 
     Set-DirectoryGrant $publish $serviceIdentity 'RX'
