@@ -113,6 +113,14 @@ $databasePath = Resolve-ConfiguredPath ([string]$settings.DatabasePath) $publish
 $historyPath = Resolve-ConfiguredPath ([string]$settings.HistoryPath) $publish
 $vaultPath = Resolve-ConfiguredPath ([string]$settings.VaultPath) $publish
 $signaturePath = Resolve-ConfiguredPath ([string]$settings.SignaturePath) $publish
+$contentStorePath = Resolve-ConfiguredPath ([string]$settings.ContentStorePath) $publish
+$trustedKeyPaths = @(
+    $settings.TrustedSigningKeys |
+        ForEach-Object {
+            Resolve-ConfiguredPath ([string]$_.PublicKeyPath) $publish
+        } |
+        Where-Object { $null -ne $_ }
+)
 $serviceIdentity = "NT SERVICE\$ServiceName"
 $binaryPath = '"' + $executable + '"'
 
@@ -153,6 +161,17 @@ try {
         & "$env:SystemRoot\System32\icacls.exe" $signaturePath /grant "${serviceIdentity}:R"
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to grant read access to $signaturePath"
+        }
+    }
+
+    if ($null -ne $contentStorePath) {
+        Set-DirectoryGrant $contentStorePath $serviceIdentity 'RX'
+    }
+
+    foreach ($trustedKeyPath in $trustedKeyPaths) {
+        & "$env:SystemRoot\System32\icacls.exe" $trustedKeyPath /grant "${serviceIdentity}:R"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to grant read access to $trustedKeyPath"
         }
     }
 
