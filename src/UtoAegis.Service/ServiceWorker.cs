@@ -16,6 +16,7 @@ namespace UtoAegis.Service;
 
 internal sealed class ServiceWorker(
     ServiceConfiguration configuration,
+    ServiceDetectionSources detectionSources,
     ILoggerFactory loggerFactory) : BackgroundService
 {
     private readonly ILogger logger = loggerFactory.CreateLogger<ServiceWorker>();
@@ -26,6 +27,23 @@ internal sealed class ServiceWorker(
         try
         {
             var scanner = await CreateScannerAsync(stoppingToken);
+            if (detectionSources.IsManagedContent)
+            {
+                ServiceLog.ThreatContentLoaded(
+                    logger,
+                    detectionSources.ContentVersion!,
+                    detectionSources.ContentSequence!.Value,
+                    detectionSources.SigningKeyId!,
+                    detectionSources.ExpiresUtc!.Value);
+                if (detectionSources.ExpiresUtc.Value <= DateTimeOffset.UtcNow)
+                {
+                    ServiceLog.ThreatContentExpired(
+                        logger,
+                        detectionSources.ContentVersion!,
+                        detectionSources.ExpiresUtc.Value);
+                }
+            }
+
             var historyStore = await CreateHistoryStoreAsync(stoppingToken);
             if (configuration.ResponsePolicy.Mode == ResponseMode.Quarantine)
             {
@@ -111,18 +129,22 @@ internal sealed class ServiceWorker(
         CancellationToken cancellationToken)
     {
         IHashReputationStore? reputationStore = null;
-        if (configuration.DatabasePath is not null)
+        if (detectionSources.DatabasePath is not null)
         {
-            var store = new SqliteHashReputationStore(configuration.DatabasePath);
-            await store.InitializeAsync(cancellationToken);
+            var store = new SqliteHashReputationStore(detectionSources.DatabasePath);
+            if (!detectionSources.IsManagedContent)
+            {
+                await store.InitializeAsync(cancellationToken);
+            }
+
             reputationStore = store;
         }
 
         ISignatureScanner? signatureScanner = null;
-        if (configuration.SignaturePath is not null)
+        if (detectionSources.SignaturePath is not null)
         {
             var ruleFile = await JsonLinesSignatureRuleReader.ReadAsync(
-                configuration.SignaturePath,
+                detectionSources.SignaturePath,
                 cancellationToken);
             signatureScanner = new FixedByteSignatureScanner(ruleFile.Rules);
             ServiceLog.SignatureRulesLoaded(

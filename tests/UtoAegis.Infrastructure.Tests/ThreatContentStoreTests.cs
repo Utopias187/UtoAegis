@@ -137,6 +137,22 @@ public sealed class ThreatContentStoreTests
         Assert.IsTrue(File.Exists(active.ReputationDatabasePath));
     }
 
+    [TestMethod]
+    public async Task GetActiveReadOnlyAsync_ValidState_DoesNotCreateStagingContent()
+    {
+        var store = CreateStore();
+        await store.ApplyAsync(await CreateBundleAsync(7, 'a'));
+        var stagingPath = Path.Combine(_testDirectory, "content-store", "staging");
+        var before = Directory.GetFileSystemEntries(stagingPath);
+
+        var active = await store.GetActiveReadOnlyAsync();
+        var after = Directory.GetFileSystemEntries(stagingPath);
+
+        Assert.AreEqual(7L, active.Manifest.Sequence);
+        Assert.HasCount(0, before);
+        Assert.HasCount(0, after);
+    }
+
     private ThreatContentStore CreateStore()
     {
         var trustedKey = new TrustedThreatSigningKey(

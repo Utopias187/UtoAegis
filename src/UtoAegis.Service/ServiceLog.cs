@@ -51,6 +51,17 @@ internal static partial class ServiceLog
         long issues);
 
     [LoggerMessage(
+        EventId = 104,
+        Level = LogLevel.Information,
+        Message = "Loaded authenticated threat content {Version} at sequence {Sequence} using key {KeyId}; expires {ExpiresUtc}.")]
+    public static partial void ThreatContentLoaded(
+        ILogger logger,
+        string version,
+        long sequence,
+        string keyId,
+        DateTimeOffset expiresUtc);
+
+    [LoggerMessage(
         EventId = 200,
         Level = LogLevel.Debug,
         Message = "Scanned {Path}; completed={Completed}, detected={Detected}.")]
@@ -91,6 +102,15 @@ internal static partial class ServiceLog
         FileMonitorIssueKind kind,
         string? path,
         string message);
+
+    [LoggerMessage(
+        EventId = 302,
+        Level = LogLevel.Warning,
+        Message = "Active authenticated threat content {Version} expired at {ExpiresUtc}; continuing with the last known-good version.")]
+    public static partial void ThreatContentExpired(
+        ILogger logger,
+        string version,
+        DateTimeOffset expiresUtc);
 
     [LoggerMessage(
         EventId = 400,

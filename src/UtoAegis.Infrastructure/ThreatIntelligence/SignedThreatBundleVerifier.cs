@@ -74,6 +74,67 @@ public sealed class SignedThreatBundleVerifier
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<VerifiedThreatBundle> VerifyInstalledAsync(
+        string contentDirectory,
+        long expectedSequence,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentDirectory);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedSequence);
+        var contentPath = Path.GetFullPath(contentDirectory);
+        ValidateBundleDirectory(contentPath, allowReputationDatabase: true);
+
+        try
+        {
+            var manifest = await ReadAuthenticatedManifestAsync(
+                contentPath,
+                cancellationToken).ConfigureAwait(false);
+            if (manifest.Sequence != expectedSequence)
+            {
+                throw new ThreatUpdateException(
+                    "The installed update sequence does not match the content-store state.");
+            }
+
+            foreach (var content in manifest.Contents)
+            {
+                await VerifyPayloadAsync(
+                    Path.Combine(contentPath, content.FileName),
+                    content,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var indicators = await JsonLinesIndicatorReader.ReadAsync(
+                Path.Combine(contentPath, "indicators.jsonl"),
+                cancellationToken).ConfigureAwait(false);
+            if (indicators.Indicators.Count == 0)
+            {
+                throw new ThreatUpdateException(
+                    "The hash-indicator payload must contain at least one indicator.");
+            }
+
+            var signatures = await JsonLinesSignatureRuleReader.ReadAsync(
+                Path.Combine(contentPath, "signatures.jsonl"),
+                cancellationToken).ConfigureAwait(false);
+            return new VerifiedThreatBundle(manifest, contentPath, indicators, signatures);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ThreatUpdateException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            CryptographicException or IndicatorImportException or SignatureRuleFileException)
+        {
+            throw new ThreatUpdateException(
+                "The installed threat content could not be verified.",
+                exception);
+        }
+    }
+
     private async ValueTask<VerifiedThreatBundle> VerifyAndStageCoreAsync(
         string bundleDirectory,
         string stagingDirectory,
@@ -101,21 +162,11 @@ public sealed class SignedThreatBundleVerifier
                 Path.Combine(bundlePath, ManifestFileName),
                 ThreatManifestReader.MaximumManifestLength,
                 cancellationToken).ConfigureAwait(false);
-            var manifest = ThreatManifestReader.Read(manifestBytes);
-            var signature = await ReadSignatureAsync(
-                Path.Combine(bundlePath, SignatureFileName),
+            var authenticated = await AuthenticateManifestAsync(
+                bundlePath,
+                manifestBytes,
                 cancellationToken).ConfigureAwait(false);
-
-            if (!_trustStore.TryGetKey(manifest.KeyId, out var signingKey))
-            {
-                throw new ThreatUpdateException(
-                    $"The signing key '{manifest.KeyId}' is not trusted.");
-            }
-
-            if (!signingKey!.Verify(manifestBytes, signature))
-            {
-                throw new ThreatUpdateException("The update manifest signature is not valid.");
-            }
+            var manifest = authenticated.Manifest;
 
             if (highestAcceptedSequence.HasValue)
             {
@@ -141,7 +192,7 @@ public sealed class SignedThreatBundleVerifier
                 cancellationToken).ConfigureAwait(false);
             await File.WriteAllTextAsync(
                 Path.Combine(stagingPath, SignatureFileName),
-                Convert.ToBase64String(signature),
+                Convert.ToBase64String(authenticated.Signature),
                 new UTF8Encoding(false),
                 cancellationToken).ConfigureAwait(false);
 
@@ -185,6 +236,44 @@ public sealed class SignedThreatBundleVerifier
             DeleteStagingDirectory(stagingPath);
             throw new ThreatUpdateException("The signed threat bundle could not be verified.", exception);
         }
+    }
+
+    private async ValueTask<ThreatUpdateManifest> ReadAuthenticatedManifestAsync(
+        string bundlePath,
+        CancellationToken cancellationToken)
+    {
+        var manifestBytes = await ReadBoundedFileAsync(
+            Path.Combine(bundlePath, ManifestFileName),
+            ThreatManifestReader.MaximumManifestLength,
+            cancellationToken).ConfigureAwait(false);
+        var authenticated = await AuthenticateManifestAsync(
+            bundlePath,
+            manifestBytes,
+            cancellationToken).ConfigureAwait(false);
+        return authenticated.Manifest;
+    }
+
+    private async ValueTask<(ThreatUpdateManifest Manifest, byte[] Signature)> AuthenticateManifestAsync(
+        string bundlePath,
+        byte[] manifestBytes,
+        CancellationToken cancellationToken)
+    {
+        var manifest = ThreatManifestReader.Read(manifestBytes);
+        var signature = await ReadSignatureAsync(
+            Path.Combine(bundlePath, SignatureFileName),
+            cancellationToken).ConfigureAwait(false);
+        if (!_trustStore.TryGetKey(manifest.KeyId, out var signingKey))
+        {
+            throw new ThreatUpdateException(
+                $"The signing key '{manifest.KeyId}' is not trusted.");
+        }
+
+        if (!signingKey!.Verify(manifestBytes, signature))
+        {
+            throw new ThreatUpdateException("The update manifest signature is not valid.");
+        }
+
+        return (manifest, signature);
     }
 
     private static void ValidateBundleDirectory(
@@ -334,6 +423,43 @@ public sealed class SignedThreatBundleVerifier
         }
 
         await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        var actualHash = hash.GetHashAndReset();
+        var expectedHash = Convert.FromHexString(content.Sha256);
+        if (length != content.Length ||
+            !CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
+        {
+            throw new ThreatUpdateException(
+                $"'{content.FileName}' does not match its signed length and SHA-256 digest.");
+        }
+    }
+
+    private static async ValueTask VerifyPayloadAsync(
+        string path,
+        ThreatContentDescriptor content,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[64 * 1024];
+        long length = 0;
+        int bytesRead;
+        while ((bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
+        {
+            length += bytesRead;
+            if (length > content.Length || length > ThreatContentDescriptor.MaximumPayloadLength)
+            {
+                throw new ThreatUpdateException($"'{content.FileName}' exceeds its signed length.");
+            }
+
+            hash.AppendData(buffer.AsSpan(0, bytesRead));
+        }
+
         var actualHash = hash.GetHashAndReset();
         var expectedHash = Convert.FromHexString(content.Sha256);
         if (length != content.Length ||

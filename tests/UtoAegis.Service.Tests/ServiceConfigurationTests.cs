@@ -8,6 +8,7 @@ public sealed class ServiceConfigurationTests
 {
     private string testDirectory = null!;
     private string monitorRoot = null!;
+    private string externalContentStore = null!;
 
     [TestInitialize]
     public void Initialize()
@@ -17,6 +18,7 @@ public sealed class ServiceConfigurationTests
             "UtoAegis.Service.Tests",
             Guid.NewGuid().ToString("N"));
         monitorRoot = Path.Combine(testDirectory, "monitored");
+        externalContentStore = testDirectory + "-content";
         Directory.CreateDirectory(monitorRoot);
     }
 
@@ -26,6 +28,11 @@ public sealed class ServiceConfigurationTests
         if (Directory.Exists(testDirectory))
         {
             Directory.Delete(testDirectory, recursive: true);
+        }
+
+        if (Directory.Exists(externalContentStore))
+        {
+            Directory.Delete(externalContentStore, recursive: true);
         }
     }
 
@@ -140,6 +147,72 @@ public sealed class ServiceConfigurationTests
             ServiceConfiguration.Load(configuration, testDirectory));
 
         StringAssert.Contains(exception.Message, "detection source");
+    }
+
+    [TestMethod]
+    public void Load_ManagedContentConfiguration_ResolvesStoreAndTrustedKey()
+    {
+        var keyPath = Path.Combine(testDirectory, "keys", "release.pem");
+        Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
+        File.WriteAllText(keyPath, "test public key");
+        var contentStorePath = externalContentStore;
+        Directory.CreateDirectory(contentStorePath);
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:ContentStorePath"] = contentStorePath,
+            ["UtoAegis:TrustedSigningKeys:0:KeyId"] = "release-key-1",
+            ["UtoAegis:TrustedSigningKeys:0:PublicKeyPath"] = keyPath
+        });
+
+        var result = ServiceConfiguration.Load(configuration, testDirectory);
+
+        Assert.IsNull(result.DatabasePath);
+        Assert.IsNull(result.SignaturePath);
+        Assert.IsNotNull(result.ContentStorePath);
+        Assert.AreEqual(keyPath, result.TrustedSigningKeyPaths["release-key-1"]);
+        CollectionAssert.Contains(
+            result.OperationalExclusions.ToArray(),
+            result.ContentStorePath);
+    }
+
+    [TestMethod]
+    public void Load_ManagedContentWithDirectPath_Throws()
+    {
+        var keyPath = Path.Combine(testDirectory, "release.pem");
+        File.WriteAllText(keyPath, "test public key");
+        var contentStorePath = externalContentStore;
+        Directory.CreateDirectory(contentStorePath);
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:ContentStorePath"] = contentStorePath,
+            ["UtoAegis:DatabasePath"] = "state/reputation.db",
+            ["UtoAegis:TrustedSigningKeys:0:KeyId"] = "release-key-1",
+            ["UtoAegis:TrustedSigningKeys:0:PublicKeyPath"] = keyPath
+        });
+
+        var exception = Assert.ThrowsExactly<ServiceConfigurationException>(() =>
+            ServiceConfiguration.Load(configuration, testDirectory));
+
+        StringAssert.Contains(exception.Message, "cannot be combined");
+    }
+
+    [TestMethod]
+    public void Load_ManagedContentWithoutTrustedKey_Throws()
+    {
+        var contentStorePath = externalContentStore;
+        Directory.CreateDirectory(contentStorePath);
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["UtoAegis:MonitorRoot"] = monitorRoot,
+            ["UtoAegis:ContentStorePath"] = contentStorePath
+        });
+
+        var exception = Assert.ThrowsExactly<ServiceConfigurationException>(() =>
+            ServiceConfiguration.Load(configuration, testDirectory));
+
+        StringAssert.Contains(exception.Message, "requires at least one");
     }
 
     [TestMethod]

@@ -128,6 +128,26 @@ public sealed class ThreatContentStore
         return await ValidateInstalledAsync(state.Active, cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<ThreatContentSnapshot> GetActiveReadOnlyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        EnsureRegularDirectory(_rootPath);
+        EnsureRegularDirectory(_versionsPath);
+        var state = await ThreatContentStateFile.ReadAsync(_statePath, cancellationToken)
+            .ConfigureAwait(false) ??
+            throw new ThreatUpdateException("The threat-content store has no active version.");
+        var contentPath = GetVersionPath(state.Active);
+        var verified = await RequireVerifier().VerifyInstalledAsync(
+            contentPath,
+            state.Active.Sequence,
+            cancellationToken).ConfigureAwait(false);
+        await ValidateInstalledDatabaseAsync(
+            verified,
+            contentPath,
+            cancellationToken).ConfigureAwait(false);
+        return CreateSnapshot(verified.Manifest, contentPath);
+    }
+
     public async ValueTask<ThreatContentSnapshot> RollbackAsync(
         CancellationToken cancellationToken = default)
     {
@@ -213,28 +233,39 @@ public sealed class ThreatContentStore
                 verificationPath,
                 reference.Sequence,
                 cancellationToken).ConfigureAwait(false);
-            var databasePath = Path.Combine(contentPath, ReputationDatabaseFileName);
-            if (!File.Exists(databasePath))
-            {
-                throw new ThreatUpdateException(
-                    "The installed threat content is missing its reputation database.");
-            }
-
-            var firstIndicator = verified.Indicators.Indicators.First();
-            var database = new SqliteHashReputationStore(databasePath, pooling: false);
-            var lookup = await database.LookupAsync(firstIndicator.Sha256, cancellationToken)
-                .ConfigureAwait(false);
-            if (lookup.Status != HashReputationStatus.Malicious)
-            {
-                throw new ThreatUpdateException(
-                    "The installed reputation database does not match the signed indicator feed.");
-            }
+            await ValidateInstalledDatabaseAsync(
+                verified,
+                contentPath,
+                cancellationToken).ConfigureAwait(false);
 
             return CreateSnapshot(verified.Manifest, contentPath);
         }
         finally
         {
             DeleteOwnedStagingDirectory(verificationPath);
+        }
+    }
+
+    private static async ValueTask ValidateInstalledDatabaseAsync(
+        VerifiedThreatBundle verified,
+        string contentPath,
+        CancellationToken cancellationToken)
+    {
+        var databasePath = Path.Combine(contentPath, ReputationDatabaseFileName);
+        if (!File.Exists(databasePath))
+        {
+            throw new ThreatUpdateException(
+                "The installed threat content is missing its reputation database.");
+        }
+
+        var firstIndicator = verified.Indicators.Indicators.First();
+        var database = new SqliteHashReputationStore(databasePath, pooling: false);
+        var lookup = await database.LookupAsync(firstIndicator.Sha256, cancellationToken)
+            .ConfigureAwait(false);
+        if (lookup.Status != HashReputationStatus.Malicious)
+        {
+            throw new ThreatUpdateException(
+                "The installed reputation database does not match the signed indicator feed.");
         }
     }
 

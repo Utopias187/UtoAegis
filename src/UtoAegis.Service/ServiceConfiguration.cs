@@ -18,6 +18,8 @@ public sealed class ServiceConfiguration
         bool runInitialScan,
         string? databasePath,
         string? signaturePath,
+        string? contentStorePath,
+        IReadOnlyDictionary<string, string> trustedSigningKeyPaths,
         string? historyPath,
         string? vaultPath,
         int maximumConcurrency,
@@ -32,6 +34,8 @@ public sealed class ServiceConfiguration
         RunInitialScan = runInitialScan;
         DatabasePath = databasePath;
         SignaturePath = signaturePath;
+        ContentStorePath = contentStorePath;
+        TrustedSigningKeyPaths = trustedSigningKeyPaths;
         HistoryPath = historyPath;
         VaultPath = vaultPath;
         MaximumConcurrency = maximumConcurrency;
@@ -51,6 +55,10 @@ public sealed class ServiceConfiguration
     public string? DatabasePath { get; }
 
     public string? SignaturePath { get; }
+
+    public string? ContentStorePath { get; }
+
+    public IReadOnlyDictionary<string, string> TrustedSigningKeyPaths { get; }
 
     public string? HistoryPath { get; }
 
@@ -92,6 +100,13 @@ public sealed class ServiceConfiguration
                 paths.Add(SignaturePath);
             }
 
+            if (ContentStorePath is not null)
+            {
+                paths.Add(ContentStorePath);
+            }
+
+            paths.AddRange(TrustedSigningKeyPaths.Values);
+
             return paths;
         }
     }
@@ -111,12 +126,43 @@ public sealed class ServiceConfiguration
 
             var databasePath = OptionalPath(section, "DatabasePath", baseDirectory);
             var signaturePath = OptionalPath(section, "SignaturePath", baseDirectory);
+            var contentStorePath = OptionalPath(section, "ContentStorePath", baseDirectory);
+            var trustedSigningKeyPaths = ReadTrustedSigningKeys(
+                section.GetSection("TrustedSigningKeys"),
+                baseDirectory);
             var historyPath = OptionalPath(section, "HistoryPath", baseDirectory);
             var vaultPath = OptionalPath(section, "VaultPath", baseDirectory);
-            if (databasePath is null && signaturePath is null)
+            if (contentStorePath is null && databasePath is null && signaturePath is null)
             {
                 throw new ServiceConfigurationException(
-                    "UtoAegis requires DatabasePath, SignaturePath, or both as a detection source.");
+                    "UtoAegis requires a detection source: ContentStorePath, DatabasePath, SignaturePath, or both direct paths.");
+            }
+
+            if (contentStorePath is not null &&
+                (databasePath is not null || signaturePath is not null))
+            {
+                throw new ServiceConfigurationException(
+                    "ContentStorePath cannot be combined with DatabasePath or SignaturePath.");
+            }
+
+            if (contentStorePath is not null && trustedSigningKeyPaths.Count == 0)
+            {
+                throw new ServiceConfigurationException(
+                    "ContentStorePath requires at least one TrustedSigningKeys entry.");
+            }
+
+            if (contentStorePath is not null &&
+                (!Directory.Exists(contentStorePath) ||
+                 File.GetAttributes(contentStorePath).HasFlag(FileAttributes.ReparsePoint)))
+            {
+                throw new ServiceConfigurationException(
+                    "ContentStorePath must reference an existing regular directory.");
+            }
+
+            if (contentStorePath is null && trustedSigningKeyPaths.Count != 0)
+            {
+                throw new ServiceConfigurationException(
+                    "TrustedSigningKeys requires ContentStorePath.");
             }
 
             if (signaturePath is not null && !File.Exists(signaturePath))
@@ -125,7 +171,12 @@ public sealed class ServiceConfiguration
                     "The configured signature rule file does not exist.");
             }
 
-            ValidateDistinctOperationalPaths(databasePath, signaturePath, historyPath, vaultPath);
+            ValidateDistinctOperationalPaths(
+                databasePath,
+                signaturePath,
+                contentStorePath,
+                historyPath,
+                vaultPath);
 
             var responseSection = section.GetSection("Response");
             var mode = ParseEnum(
@@ -149,6 +200,12 @@ public sealed class ServiceConfiguration
                     "to preserve least privilege and prevent monitoring loops.");
             }
 
+            if (contentStorePath is not null && IsWithin(monitorRoot, contentStorePath))
+            {
+                throw new ServiceConfigurationException(
+                    "ContentStorePath must be outside MonitorRoot to prevent monitoring loops.");
+            }
+
             var writableDirectories = writablePaths
                 .Select(path => path == vaultPath ? path : Path.GetDirectoryName(path)!)
                 .Distinct(OperatingSystem.IsWindows()
@@ -165,11 +222,28 @@ public sealed class ServiceConfiguration
                     "the service installation directory.");
             }
 
+            if (contentStorePath is not null &&
+                (PathEquals(contentStorePath, Path.GetPathRoot(contentStorePath)!) ||
+                 IsWithin(contentStorePath, installationDirectory) ||
+                 IsWithin(installationDirectory, contentStorePath)))
+            {
+                throw new ServiceConfigurationException(
+                    "ContentStorePath must not be a filesystem root, contain the service installation, or be inside it.");
+            }
+
             if (signaturePath is not null &&
                 writableDirectories.Any(directory => IsWithin(directory, signaturePath)))
             {
                 throw new ServiceConfigurationException(
                     "SignaturePath must be outside writable state directories.");
+            }
+
+            if (contentStorePath is not null && trustedSigningKeyPaths.Values.Any(path =>
+                    IsWithin(contentStorePath, path) ||
+                    writableDirectories.Any(directory => IsWithin(directory, path))))
+            {
+                throw new ServiceConfigurationException(
+                    "Trusted signing keys must be outside the content store and writable state directories.");
             }
 
             if (IsWithin(monitorRoot, installationDirectory))
@@ -234,6 +308,8 @@ public sealed class ServiceConfiguration
                 runInitialScan,
                 databasePath,
                 signaturePath,
+                contentStorePath,
+                trustedSigningKeyPaths,
                 historyPath,
                 vaultPath,
                 maximumConcurrency,
@@ -350,6 +426,45 @@ public sealed class ServiceConfiguration
             .Select(value => value!)
             .ToArray();
 
+    private static Dictionary<string, string> ReadTrustedSigningKeys(
+        IConfiguration section,
+        string baseDirectory)
+    {
+        var keys = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var child in section.GetChildren())
+        {
+            var keyId = child["KeyId"]?.Trim();
+            var publicKeyPath = child["PublicKeyPath"];
+            if (string.IsNullOrWhiteSpace(keyId) || string.IsNullOrWhiteSpace(publicKeyPath))
+            {
+                throw new ServiceConfigurationException(
+                    "Every TrustedSigningKeys entry requires KeyId and PublicKeyPath.");
+            }
+
+            var resolvedPath = ResolvePath(publicKeyPath, baseDirectory);
+            if (!File.Exists(resolvedPath) ||
+                File.GetAttributes(resolvedPath).HasFlag(FileAttributes.ReparsePoint))
+            {
+                throw new ServiceConfigurationException(
+                    $"Trusted signing key '{keyId}' must reference an existing regular file.");
+            }
+
+            if (!keys.TryAdd(keyId, resolvedPath))
+            {
+                throw new ServiceConfigurationException(
+                    $"Trusted signing key id '{keyId}' is duplicated.");
+            }
+
+            if (keys.Count > 32)
+            {
+                throw new ServiceConfigurationException(
+                    "At most 32 trusted signing keys may be configured.");
+            }
+        }
+
+        return keys;
+    }
+
     private static void ValidateMonitorRoot(string path)
     {
         if (!Directory.Exists(path))
@@ -374,7 +489,7 @@ public sealed class ServiceConfiguration
         if (values.Distinct(comparer).Count() != values.Length)
         {
             throw new ServiceConfigurationException(
-                "Database, signature, history, and vault paths must be distinct.");
+                "Database, signature, content store, history, and vault paths must be distinct.");
         }
     }
 

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using UtoAegis.Infrastructure.ThreatIntelligence;
 
 namespace UtoAegis.Service;
 
@@ -36,16 +37,29 @@ internal static class Program
             return 2;
         }
 
+        ServiceDetectionSources detectionSources;
+        try
+        {
+            detectionSources = await ServiceDetectionSources.ResolveAsync(configuration);
+        }
+        catch (ThreatUpdateException exception)
+        {
+            Console.Error.WriteLine($"Threat-content error: {exception.Message}");
+            return 2;
+        }
+
         if (validateOnly)
         {
             Console.WriteLine(
                 $"Configuration valid: monitor={configuration.MonitorRoot}; " +
                 $"response={configuration.ResponsePolicy.Mode}; " +
-                $"recursive={configuration.Recursive}.");
+                $"recursive={configuration.Recursive}; " +
+                $"content={detectionSources.ContentVersion ?? "direct"}.");
             return 0;
         }
 
         builder.Services.AddSingleton(configuration);
+        builder.Services.AddSingleton(detectionSources);
         builder.Services.AddHostedService<ServiceWorker>();
         using var host = builder.Build();
         await host.RunAsync();
