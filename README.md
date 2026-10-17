@@ -4,8 +4,9 @@ UtoAegis is an incrementally developed Windows endpoint-security product. It
 currently combines safe SHA-256 hashing, a versioned local reputation database,
 streaming exact-byte signature detection, bounded directory traversal, and
 opt-in structured scan history, real-time directory monitoring, and reversible
-quarantine. It does not execute scanned files or automatically quarantine or
-delete them.
+quarantine. A supervised Windows service adds health and detection events plus
+an explicit response policy. It does not execute scanned files, and the service
+defaults to observe-only behavior.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
@@ -20,6 +21,9 @@ Implementation decisions and verification notes are recorded in the
   the restricted filesystem quarantine vault.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
+- `UtoAegis.Service` hosts the monitor under Windows Service Control Manager,
+  validates deployment boundaries, emits Event Log health and detection events,
+  and applies the configured response policy.
 
 ```text
 directory -> bounded traversal -> regular file paths -|
@@ -30,7 +34,10 @@ single file ------------------------------------------|-> composite file scanner
                                                        |-> optional history store
 filesystem events -> bounded queue -> debounce --------|
                          | overflow -> recovery directory scan
-detection result -> identity recheck -> restricted vault -> verified restore
+detection result -> allowlists -> observe / dry run / bounded quarantine
+                                         |-> identity recheck -> restricted vault
+Windows SCM -> supervised service -> health and detection events
+restricted vault -> integrity check -> no-overwrite restore
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -151,6 +158,26 @@ With `--json`, standard output is a JSON Lines stream containing a separate
 `recoveryScan`, `fileScan`, or `monitorIssue` object for each result. Requested
 history is appended per scan. Operational JSON Lines logs remain on standard
 error and can be suppressed with `--quiet`.
+
+## Windows background service
+
+`UtoAegis.Service` runs the same bounded monitoring pipeline under Windows
+Service Control Manager. Configuration is rejected before startup when paths,
+queue limits, response limits, or privilege boundaries are unsafe. Observe-only
+is the default; `DryRunQuarantine` records what would happen, and `Quarantine`
+requires explicit configuration and an external vault while supporting hash and
+path allowlists and enforcing a bounded action rate.
+
+The lifecycle scripts publish, validate, install, inspect, and remove the
+service. Installation uses the managed virtual account `NT SERVICE\UtoAegis`,
+grants read/execute access to the monitored tree, and adds only `Delete child`
+when quarantine mode is explicitly enabled. Service health, recovery scans,
+detections, decisions, and operational failures are written to the Windows
+Application event log.
+
+See the [Windows service deployment guide](docs/windows-service.md) for the
+configuration schema, protected directory layout, staged rollout, commands,
+recovery workflow, and current limitations.
 
 ## Quarantine and recovery
 
@@ -326,8 +353,9 @@ a clean-file verdict.
 - The database is integrity-sensitive. This milestone does not sign indicator
   feeds or the database, so only trusted operators should be able to replace or
   modify them.
-- A later enforcement or quarantine action must revalidate file identity at the
-  point of action; path and metadata checks cannot eliminate every race.
+- Every quarantine action revalidates the expected hash and length through the
+  exact Windows handle used for removal. Path and metadata checks alone are not
+  treated as authorization to change a file.
 - Directory scans reject a reparse-point root, never follow discovered reparse
   points, and revalidate entries immediately before scanning. These controls
   reduce traversal and replacement races but cannot eliminate filesystem
@@ -352,8 +380,16 @@ a clean-file verdict.
 - Changed entries are revalidated as regular files inside the monitored root
   immediately before scanning. Reparse points are not followed, but replacement
   races remain possible after validation.
-- Detection is currently observational. No file is quarantined, deleted, or
-  modified automatically; quarantine requires an explicit command.
+- CLI detection remains observational unless the operator invokes `quarantine
+  add`. The Windows service is observe-only by default; automatic quarantine
+  requires an administrator-controlled policy and installation layout. Hash and
+  path allowlists are evaluated before dry-run or quarantine behavior, and a
+  sliding-window rate limit bounds attempted actions.
+- The service uses a passwordless `NT SERVICE\UtoAegis` virtual account. Its
+  executable and policy inputs are read-only, writable state stays outside the
+  monitored tree, and quarantine mode receives delete-child rather than general
+  write access to that tree. An administrator or compromised service process
+  remains inside the host trust boundary.
 - Quarantine requires a completed detection and rechecks the expected SHA-256
   and length through the exact Windows file handle used for removal. This closes
   the path replacement window between validation and deletion on Windows.
@@ -448,7 +484,18 @@ a clean-file verdict.
 - [x] Added add, list, show, and restore CLI workflows with JSON and exit codes.
 - [x] Added ACL, corruption, identity-race, overwrite, recovery, and live CLI tests.
 
-The next milestone should turn UtoAegis into a supervised Windows background
-service with an explicit response policy and notification boundary. Monitoring
-must remain observe-only by default; any automatic quarantine mode needs policy
-configuration, allowlists, rate limits, and an operator-visible recovery path.
+### Milestone 8 — Supervised Windows monitoring service
+
+- [x] Added an independently tested response-policy boundary.
+- [x] Kept service response observe-only by default and added dry-run behavior.
+- [x] Added hash and path-prefix allowlists plus a bounded action rate.
+- [x] Added a .NET 10 Windows Service host with startup configuration validation.
+- [x] Added health, recovery, detection, decision, and failure Event Log events.
+- [x] Added a virtual service account and mode-specific least-privilege ACLs.
+- [x] Isolated trusted signature policy from service-writable operational state.
+- [x] Added publish, install, status, and recoverable removal scripts.
+
+The next milestone should add authenticated threat-intelligence updates. Feeds
+and signature policy need cryptographic signatures, rollback protection,
+staged validation, atomic activation, and a last-known-good recovery path before
+UtoAegis can safely update detection content without manual replacement.

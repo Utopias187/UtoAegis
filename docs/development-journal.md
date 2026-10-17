@@ -750,3 +750,133 @@ service should run monitoring with least practical privilege, expose health and
 detection notifications, and remain observe-only by default. Any automatic
 quarantine policy must add allowlists, rate limits, dry-run behavior, and clear
 operator recovery before it can be enabled.
+
+## 2026-10-16 — Milestone 8: supervised Windows monitoring service
+
+### Goal
+
+Move the bounded monitor into a supervised Windows background process without
+turning a detection directly into an unbounded destructive action. Keep
+observe-only behavior as the default, make every active response decision
+auditable, and install the service with only the filesystem rights required by
+its configured mode.
+
+### Design and data flow
+
+- `ResponsePolicy` defines `ObserveOnly`, `DryRunQuarantine`, and `Quarantine`
+  modes independently of the Windows host.
+- `DetectionResponseEngine` requires a completed detection, evaluates SHA-256
+  and path-prefix allowlists, and enforces a bounded sliding action window
+  before invoking `IQuarantineStore`.
+- `UtoAegis.Service` uses the .NET Generic Host and Windows Service lifetime to
+  run the existing watcher, recovery scanner, composite detector, optional
+  history store, response engine, and quarantine vault.
+- Configuration is validated before the host starts. Relative operational and
+  allowlist paths are anchored to the installation directory rather than the
+  Service Control Manager working directory.
+- Health counters and lifecycle, recovery, detection, response, monitor issue,
+  and history-failure events flow through `ILogger` to the Windows Application
+  event log.
+- Publish, install, status, and removal scripts provide a repeatable operator
+  workflow. Removal preserves files, state, vault entries, and ACLs.
+
+```text
+SCM -> service host -> watcher + recovery scans -> composite detector
+                                                  -> history
+                                                  -> response policy
+detection -> hash allowlist -> path allowlist -> observe / dry run / rate gate
+                                                        |-> quarantine vault
+service state -> periodic health event + detection/decision event
+```
+
+### Response safety
+
+- Observe-only is the constructor and configuration default. It never requires
+  a vault and never changes a detected file.
+- Dry-run passes through all detection and allowlist checks but does not reserve
+  a rate slot or call the quarantine store.
+- Quarantine mode cannot be constructed without a store, and service startup
+  requires an external vault path.
+- The default action limit is three attempts per five minutes. Configuration
+  accepts 1–100 attempts and windows from one second through 24 hours.
+- Failed attempts remain in the current window to prevent retry storms. Rate
+  state is intentionally local to the running process and resets on restart.
+- Path-prefix matching is boundary-aware and case-insensitive on Windows, so an
+  allowlist for `safe` does not accidentally include a sibling named `safety`.
+- Evidence creation moved into the core response boundary so the CLI and service
+  use the same bounded detector identifiers.
+
+### Service and privilege boundaries
+
+- The installer uses the passwordless virtual account `NT SERVICE\UtoAegis`
+  instead of Local System or an administrator account.
+- Program files and the monitored tree receive read/execute access. Quarantine
+  mode adds `Delete child` to the monitored tree but not general write access.
+- Database, history, and vault locations receive modify access because SQLite
+  sidecars and vault payloads require writes. Those locations must remain
+  outside the monitored tree.
+- Signature policy must remain outside service-writable state, preventing the
+  service account from rewriting the byte rules that determine detections.
+- Writable state cannot be a filesystem root or contain the installation
+  directory. The installation directory cannot be monitored.
+- Scanner data files and SQLite sidecars are excluded at both watcher and
+  directory-scan boundaries to prevent self-triggering loops.
+- The installer refuses a configuration already set to quarantine unless the
+  administrator supplies `-AllowQuarantineResponse`.
+
+### Verification
+
+- Locked restore resolved Microsoft.Extensions.Hosting.WindowsServices 10.0.13
+  and generated lock files for the service and its tests.
+- Release builds completed on .NET 10 with zero warnings and zero errors.
+- All 175 automated tests passed: 80 core, 47 infrastructure, 35 CLI, and 13
+  service tests.
+- Response tests cover defaults, dry-run, both allowlist types, path boundaries,
+  verified evidence, rate-window expiry, incomplete scans, and missing stores.
+- Service tests cover required detection sources, external state and vault
+  placement, policy/state isolation, installation-directory protection,
+  response settings, relative allowlist normalization, watcher limits, service
+  health accounting, response dispatch, and failed-recovery history fallback.
+- The validate-only startup path succeeded with environment-supplied monitor and
+  database paths without starting the watcher or creating service state.
+- All four PowerShell lifecycle scripts parsed successfully with the PowerShell
+  abstract syntax tree parser. Registration and ACL mutations were intentionally
+  not executed on the development host.
+- NuGet reported no known vulnerable direct or transitive packages.
+
+### Known limitations
+
+- The watcher remains a best-effort user-mode signal and can coalesce, reorder,
+  or lose changes. Overflow recovery narrows but does not eliminate that gap.
+- This is not a kernel minifilter and does not synchronously block file access or
+  execution before a scan finishes.
+- Detection policy, reputation databases, and signature files are local and
+  unsigned. Administrator compromise remains inside the trust boundary.
+- Configuration and signatures load only at startup; there is no authenticated
+  update, atomic live reload, or automatic rollback mechanism.
+- The rate limit is process-local and resets on service restart.
+- Application event logs are local operational notifications. Remote alerting,
+  incident workflow, and notification delivery guarantees are not implemented.
+- The installer grants inherited access at configured roots. A child with
+  protected inheritance can remain inaccessible and will surface as a scan
+  issue rather than being silently considered covered.
+- Service removal preserves generated files and ACL entries for recovery. Their
+  eventual retention and removal remain operator responsibilities.
+
+### Definition of done
+
+- [x] Response policy is independent of the host and defaults to observe-only.
+- [x] Hash and path allowlists precede dry-run or active response.
+- [x] Automatic quarantine attempts are bounded by a sliding time window.
+- [x] The .NET 10 host runs under Windows Service Control Manager.
+- [x] Configuration and unsafe path relationships fail before monitoring starts.
+- [x] Health, detection, response, recovery, and failure events are visible.
+- [x] The virtual service account receives mode-specific filesystem rights.
+- [x] Publish, installation, inspection, removal, and recovery are documented.
+
+### Next milestone
+
+Add authenticated threat-intelligence updates. Detection feeds and signature
+policy need cryptographic signatures, rollback protection, staged validation,
+atomic activation, and last-known-good recovery before UtoAegis accepts remote
+or unattended content updates.
