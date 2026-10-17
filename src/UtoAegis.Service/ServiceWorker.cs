@@ -40,6 +40,7 @@ internal sealed class ServiceWorker(
                 loggerFactory.CreateLogger<ServiceFileMonitorSink>(),
                 responseEngine,
                 historyStore,
+                configuration.MonitorRoot,
                 configuration.Recursive);
             var directoryScanner = new DirectoryScanner(
                 scanner,

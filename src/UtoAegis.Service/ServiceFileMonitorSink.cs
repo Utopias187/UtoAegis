@@ -10,6 +10,7 @@ internal sealed class ServiceFileMonitorSink(
     ILogger logger,
     DetectionResponseEngine responseEngine,
     IScanHistoryStore? historyStore,
+    string monitorRoot,
     bool recursive) : IFileMonitorSink
 {
     private long scannedFileCount;
@@ -55,7 +56,7 @@ internal sealed class ServiceFileMonitorSink(
         await PersistAsync(
             ScanHistoryRecord.FromDirectoryScan(
                 Guid.NewGuid(),
-                result.Result.RootPath ?? string.Empty,
+                result.Result.RootPath ?? monitorRoot,
                 recursive,
                 result.StartedUtc,
                 result.CompletedUtc,
