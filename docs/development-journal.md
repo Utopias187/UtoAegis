@@ -880,3 +880,111 @@ Add authenticated threat-intelligence updates. Detection feeds and signature
 policy need cryptographic signatures, rollback protection, staged validation,
 atomic activation, and last-known-good recovery before UtoAegis accepts remote
 or unattended content updates.
+
+## 2026-10-17 — Milestone 9: authenticated threat-intelligence updates
+
+### Goal
+
+Replace manual detection-file replacement with an authenticated update path for
+both hash indicators and byte signatures. Reject stale or ambiguous packages,
+activate only fully validated content, preserve an explicit last-known-good
+version, and keep private signing keys and content-store mutation outside the
+monitoring service.
+
+### Design and data flow
+
+- Schema 1 signs the exact UTF-8 `manifest.json` bytes with ECDSA NIST P-256,
+  SHA-256, and an RFC 3279 DER signature.
+- The manifest binds fixed payload names, lengths, SHA-256 digests, version,
+  key ID, publication and expiration times, and a monotonic sequence.
+- A public-key-only trust store rejects private PEM material, unknown key IDs,
+  non-P-256 keys, oversized files, and reparse points.
+- Verification copies signed payloads into a fresh same-volume staging
+  directory, then runs the existing strict JSON Lines readers over those copies.
+- Activation builds and checks a fresh SQLite reputation database, checkpoints
+  it for read-only use, renames the complete staging directory, and atomically
+  replaces the small state pointer.
+- State retains the active and previous versions plus the highest sequence ever
+  accepted. Rollback swaps the pointers after reverification but never reduces
+  that sequence floor.
+- `updates apply`, `updates status`, and `updates rollback` expose the workflow.
+  The separate publisher script creates signed bundles without adding private
+  key handling to endpoint runtime code.
+- Service startup reads and reverifies the active version without acquiring an
+  update lock, creating staging files, or receiving write access to the store.
+
+```text
+offline publisher -> exact manifest bytes -> detached signature
+                               |-> signed indicator digest + length
+                               |-> signed signature digest + length
+endpoint CLI -> authenticate -> sequence/time policy -> stage + strict parse
+             -> fresh database -> version rename -> atomic state pointer
+service restart -> read-only reverification -> scanner inputs
+rollback -> reverify previous -> pointer swap -> sequence floor unchanged
+```
+
+### Security boundaries
+
+- The default time policy allows five minutes of clock skew and limits a new
+  manifest to a 14-day validity period.
+- Bundle directories contain exactly four regular files. Filenames are fixed,
+  case-sensitive, and never supplied by the manifest, preventing path traversal.
+- Version and key IDs use a bounded path-safe ASCII grammar.
+- The update lock serializes mutating CLI operations. Corrupt state fails closed
+  instead of resetting the anti-rollback floor.
+- Active expired content remains available as last-known-good data, with a
+  warning event, but an expired bundle cannot be newly activated.
+- The installer grants the service read-only content and public-key access.
+  Database, history, and quarantine write permissions remain separate.
+- Trust configuration and local-administrator compromise remain inside the host
+  trust boundary. A compromised signing key can authorize malicious content.
+
+### Verification
+
+- Release builds completed on .NET 10 with zero warnings and zero errors.
+- All 216 automated tests passed: 98 core, 63 infrastructure, 39 CLI, and 16
+  service tests.
+- Core tests cover required payloads, path-safe identifiers, expiration,
+  clock-skew boundaries, validity limits, and non-increasing sequences.
+- Infrastructure tests cover valid signatures, tampered manifests and payloads,
+  unknown keys, strict bundle contents, private-key rejection, staged database
+  creation, atomic state, read-only consumption, rollback, and replay rejection.
+- CLI tests cover update command parsing and the dedicated failure exit code.
+- Service tests cover managed/direct source exclusivity, required trusted keys,
+  external store placement, operational exclusions, and existing policy bounds.
+- A live harmless smoke test generated an ephemeral P-256 key, built a bundle,
+  activated sequence 1 through the CLI, and confirmed the JSON status result.
+- All five Windows PowerShell scripts parsed successfully. Service registration
+  and ACL mutations were not executed on the development host.
+- NuGet reported no known vulnerable direct or transitive packages.
+
+### Known limitations
+
+- Milestone 9 authenticates local bundle activation but does not fetch, schedule,
+  retry, or distribute updates.
+- The service loads one verified snapshot at startup and does not live-reload.
+- Only the immediate previous version is addressable by the rollback command.
+  Older version directories have no automated retention policy.
+- Key rotation uses overlapping configured keys; there is no signed revocation
+  object or automated compromise-recovery protocol.
+- The anti-rollback floor is local. Offline disk rewriting by a local
+  administrator remains within the trust boundary.
+- Payload authenticity does not make the fixed-byte detection model equivalent
+  to a production antivirus engine or kernel enforcement layer.
+
+### Definition of done
+
+- [x] Exact manifest bytes receive a detached cryptographic signature.
+- [x] Both payloads are length- and SHA-256-bound to the signed manifest.
+- [x] Unknown keys, malformed content, bad signatures, expiry, and rollback fail closed.
+- [x] Validation and database construction finish before atomic activation.
+- [x] Last-known-good rollback reverifies content and preserves the sequence floor.
+- [x] Operator CLI, offline publisher, service startup, events, and ACLs are integrated.
+- [x] The Windows service remains a read-only consumer of managed content.
+
+### Next milestone
+
+Add a separately privileged production updater around this authenticated
+activation core. It should provide HTTPS retrieval, retry and backoff, staged
+rollout telemetry, disk-retention bounds, and explicit signing-key rotation and
+revocation while keeping the monitoring service read-only.

@@ -17,17 +17,22 @@ C:\Program Files\UtoAegis\
   runtime files...
 
 C:\ProgramData\UtoAegis\Policy\
-  signatures.jsonl
+  production-2026.public.pem
 
 C:\ProgramData\UtoAegis\State\
-  reputation.db
   history.db
   quarantine\
+
+C:\ProgramData\UtoAegis\Content\
+  state.json
+  versions\
+  staging\
 ```
 
 The installer gives `NT SERVICE\UtoAegis` read/execute access to the program
-and monitored directories, read access to the signature file, and modify access
-only to configured state directories. Quarantine mode additionally receives
+and monitored directories, read access to managed content and public keys, and
+modify access only to configured operational state directories. Quarantine mode
+additionally receives
 `Delete child` on the monitored tree so the verified handle-removal operation
 can complete. It does not receive general write access to monitored content.
 
@@ -36,6 +41,8 @@ Configuration validation rejects these layouts:
 - the service installation directory inside the monitored tree;
 - the database, history database, or vault inside the monitored tree;
 - a signature file inside a service-writable state directory;
+- a content store inside the monitored or installation tree;
+- a trusted public key inside the content store or writable state;
 - a writable state directory that is a filesystem root or contains the service
   installation directory;
 - the same path assigned to two operational roles; or
@@ -53,8 +60,13 @@ allowlist entries, are resolved from the service installation directory.
     "MonitorRoot": "C:\\Users\\Public\\Downloads",
     "Recursive": true,
     "RunInitialScan": true,
-    "DatabasePath": "C:\\ProgramData\\UtoAegis\\State\\reputation.db",
-    "SignaturePath": "C:\\ProgramData\\UtoAegis\\Policy\\signatures.jsonl",
+    "ContentStorePath": "C:\\ProgramData\\UtoAegis\\Content",
+    "TrustedSigningKeys": [
+      {
+        "KeyId": "production-2026",
+        "PublicKeyPath": "C:\\ProgramData\\UtoAegis\\Policy\\production-2026.public.pem"
+      }
+    ],
     "HistoryPath": "C:\\ProgramData\\UtoAegis\\State\\history.db",
     "VaultPath": "C:\\ProgramData\\UtoAegis\\State\\quarantine",
     "MaximumConcurrency": 4,
@@ -75,10 +87,16 @@ allowlist entries, are resolved from the service installation directory.
 }
 ```
 
-At least one of `DatabasePath` or `SignaturePath` is required. A missing
-reputation database is initialized as an empty database; a configured signature
-file must already exist. The signature rules are loaded at startup, so a policy
-change requires a controlled service restart.
+`ContentStorePath` with at least one `TrustedSigningKeys` entry is the preferred
+detection source. It cannot be combined with `DatabasePath` or `SignaturePath`.
+The direct paths remain available for manual or development deployments; at
+least one direct path is required when no managed store is configured. All
+detection content is loaded at startup, so activation or rollback requires a
+controlled service restart.
+
+Build and activate the initial signed content before validating or installing
+the service. The complete workflow and bundle schema are in the
+[authenticated update guide](authenticated-threat-updates.md).
 
 The principal bounds are:
 
@@ -121,8 +139,9 @@ pwsh ./scripts/windows/Publish-UtoAegisService.ps1 `
   -OutputDirectory 'C:\Program Files\UtoAegis'
 ```
 
-Place reviewed signature policy in its read-only policy directory, edit the
-published `appsettings.json`, and validate it without starting monitoring:
+Place the trusted public key in its read-only policy directory, activate an
+initial signed bundle, edit the published `appsettings.json`, and validate it
+without starting monitoring:
 
 ```powershell
 & 'C:\Program Files\UtoAegis\utoaegis-service.exe' --validate-config
@@ -151,9 +170,10 @@ Application log events with:
 pwsh ./scripts/windows/Get-UtoAegisServiceStatus.ps1
 ```
 
-Event IDs are grouped by purpose: `100`–`103` cover lifecycle and health,
-`200`–`201` cover file and recovery scans, `300`–`301` cover detections and
-monitor issues, and `400` reports history persistence failure. Event data can
+Event IDs are grouped by purpose: `100`–`104` cover lifecycle, health, and
+authenticated content loading; `200`–`201` cover file and recovery scans;
+`300`–`301` cover detections and monitor issues; `302` warns about expired
+last-known-good content; and `400` reports history persistence failure. Event data can
 include file paths and must follow the host's access and retention policy.
 
 To recover a quarantined file, stop the service, inspect the vault with
@@ -175,9 +195,9 @@ preserved deliberately so removal does not destroy recovery evidence.
 
 - The filesystem watcher is a best-effort change signal, not a kernel minifilter
   or a transactional audit source. Overflow triggers a recovery scan.
-- Policy and reputation files are local and not cryptographically signed.
-- Configuration and rules are loaded only at startup; there is no authenticated
-  live update channel or atomic policy reload.
+- Signed bundles require operator-supplied transport and activation; there is no
+  built-in network fetcher or scheduler.
+- Configuration and content are loaded only at startup; there is no live reload.
 - Rate-limit state is in memory and resets when the service restarts.
 - Event Log messages are operational notifications, not a remote alerting or
   incident-management integration.

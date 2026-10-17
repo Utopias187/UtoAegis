@@ -5,8 +5,9 @@ currently combines safe SHA-256 hashing, a versioned local reputation database,
 streaming exact-byte signature detection, bounded directory traversal, and
 opt-in structured scan history, real-time directory monitoring, and reversible
 quarantine. A supervised Windows service adds health and detection events plus
-an explicit response policy. It does not execute scanned files, and the service
-defaults to observe-only behavior.
+an explicit response policy. Authenticated threat bundles add signed, staged,
+rollback-protected updates for both reputation and signature content. UtoAegis
+does not execute scanned files, and the service defaults to observe-only behavior.
 
 Implementation decisions and verification notes are recorded in the
 [development journal](docs/development-journal.md).
@@ -18,7 +19,8 @@ Implementation decisions and verification notes are recorded in the
   and signature engines. It has no SQLite dependency.
 - `UtoAegis.Infrastructure` contains separate SQLite reputation and scan-history
   stores, strict JSON Lines readers, the bounded filesystem event source, and
-  the restricted filesystem quarantine vault.
+  the restricted filesystem quarantine vault. It also verifies, stages, and
+  atomically activates signed threat-content bundles.
 - `UtoAegis.Cli` handles commands, cancellation, structured logs, output, and
   process exit codes.
 - `UtoAegis.Service` hosts the monitor under Windows Service Control Manager,
@@ -38,6 +40,8 @@ detection result -> allowlists -> observe / dry run / bounded quarantine
                                          |-> identity recheck -> restricted vault
 Windows SCM -> supervised service -> health and detection events
 restricted vault -> integrity check -> no-overwrite restore
+offline signer -> signed bundle -> verify + stage -> atomic active pointer
+                                               |-> last-known-good rollback
 ```
 
 `Unknown` means only that the digest is absent from the configured database. It
@@ -158,6 +162,53 @@ With `--json`, standard output is a JSON Lines stream containing a separate
 `recoveryScan`, `fileScan`, or `monitorIssue` object for each result. Requested
 history is appended per scan. Operational JSON Lines logs remain on standard
 error and can be suppressed with `--quiet`.
+
+## Authenticated threat-intelligence updates
+
+Milestone 9 replaces manual detection-file replacement with a signed bundle
+workflow. Each bundle contains an exact-byte `manifest.json`, a detached ECDSA
+P-256/SHA-256 signature, and both JSON Lines payloads. The manifest binds their
+lengths and SHA-256 digests to a version, signing-key ID, validity window, and
+strictly increasing sequence number.
+
+Create bundles only on an offline or otherwise controlled publishing system.
+The private key is required by the builder but is never accepted by UtoAegis:
+
+```powershell
+pwsh ./scripts/windows/New-UtoAegisThreatBundle.ps1 `
+  -IndicatorsPath ./reviewed/indicators.jsonl `
+  -SignaturesPath ./reviewed/signatures.jsonl `
+  -Version '2026.10.17.1' `
+  -Sequence 42 `
+  -KeyId 'production-2026' `
+  -PrivateKeyPath 'D:\OfflineKeys\production-2026.private.pem' `
+  -OutputDirectory 'D:\Bundles\2026.10.17.1'
+```
+
+Copy the resulting directory to the endpoint, then apply and inspect it with
+the published operator CLI:
+
+```powershell
+& 'C:\Program Files\UtoAegis\tools\utoaegis.exe' updates apply `
+  --store 'C:\ProgramData\UtoAegis\Content' `
+  --trusted-key 'production-2026=C:\ProgramData\UtoAegis\Policy\production-2026.public.pem' `
+  'D:\Incoming\2026.10.17.1'
+
+& 'C:\Program Files\UtoAegis\tools\utoaegis.exe' updates status `
+  --store 'C:\ProgramData\UtoAegis\Content'
+```
+
+The apply command rejects unknown keys, bad signatures, malformed manifests,
+expired or excessively long validity windows, non-increasing sequences,
+payload mismatches, unexpected files, and invalid feed records. It builds a
+fresh reputation database inside a same-volume staging directory and replaces
+only the small state pointer after all checks pass. `updates rollback` reverifies
+the previous signed version before switching back and preserves the highest
+accepted sequence, so a later replay cannot bypass rollback protection.
+
+See the [authenticated update guide](docs/authenticated-threat-updates.md) for
+the bundle schema, publisher workflow, service configuration, recovery steps,
+key-rotation guidance, and remaining trust assumptions.
 
 ## Windows background service
 
@@ -495,7 +546,19 @@ a clean-file verdict.
 - [x] Isolated trusted signature policy from service-writable operational state.
 - [x] Added publish, install, status, and recoverable removal scripts.
 
-The next milestone should add authenticated threat-intelligence updates. Feeds
-and signature policy need cryptographic signatures, rollback protection,
-staged validation, atomic activation, and a last-known-good recovery path before
-UtoAegis can safely update detection content without manual replacement.
+### Milestone 9 — Authenticated threat-intelligence updates
+
+- [x] Defined a bounded manifest for indicator and byte-signature payloads.
+- [x] Added detached ECDSA P-256/SHA-256 verification with public-key-only trust stores.
+- [x] Bound payload names, lengths, and SHA-256 digests to exact manifest bytes.
+- [x] Rejected stale, future, expired, unknown-key, and non-increasing updates.
+- [x] Added strict staging and fresh reputation-database construction.
+- [x] Added atomic activation with a persistent anti-rollback sequence floor.
+- [x] Added reverified last-known-good rollback without lowering that floor.
+- [x] Added operator CLI commands, offline bundle tooling, and service startup consumption.
+- [x] Kept the service read-only to the content store and private keys off endpoints.
+
+The next milestone should add a separately privileged production updater with
+authenticated transport, retry and backoff, key rotation and revocation,
+retention limits, and rollout telemetry. The monitoring service should remain a
+read-only content consumer.
