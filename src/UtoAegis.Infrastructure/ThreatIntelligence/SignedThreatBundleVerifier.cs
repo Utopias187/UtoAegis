@@ -21,6 +21,14 @@ public sealed class SignedThreatBundleVerifier
             "signatures.jsonl"
         };
 
+    private static readonly HashSet<string> GeneratedDatabaseFileNames =
+        new(StringComparer.Ordinal)
+        {
+            ThreatContentStore.ReputationDatabaseFileName,
+            ThreatContentStore.ReputationDatabaseFileName + "-shm",
+            ThreatContentStore.ReputationDatabaseFileName + "-wal"
+        };
+
     private readonly ThreatTrustStore _trustStore;
     private readonly ThreatUpdatePolicy _policy;
     private readonly TimeProvider _timeProvider;
@@ -42,13 +50,45 @@ public sealed class SignedThreatBundleVerifier
         long highestAcceptedSequence,
         CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(highestAcceptedSequence);
+        return await VerifyAndStageCoreAsync(
+            bundleDirectory,
+            stagingDirectory,
+            highestAcceptedSequence,
+            expectedSequence: null,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<VerifiedThreatBundle> VerifyInstalledAndStageAsync(
+        string bundleDirectory,
+        string stagingDirectory,
+        long expectedSequence,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedSequence);
+        return await VerifyAndStageCoreAsync(
+            bundleDirectory,
+            stagingDirectory,
+            highestAcceptedSequence: null,
+            expectedSequence,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<VerifiedThreatBundle> VerifyAndStageCoreAsync(
+        string bundleDirectory,
+        string stagingDirectory,
+        long? highestAcceptedSequence,
+        long? expectedSequence,
+        CancellationToken cancellationToken)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(bundleDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(stagingDirectory);
-        ArgumentOutOfRangeException.ThrowIfNegative(highestAcceptedSequence);
 
         var bundlePath = Path.GetFullPath(bundleDirectory);
         var stagingPath = Path.GetFullPath(stagingDirectory);
-        ValidateBundleDirectory(bundlePath);
+        ValidateBundleDirectory(
+            bundlePath,
+            allowReputationDatabase: expectedSequence.HasValue);
         if (Directory.Exists(stagingPath) || File.Exists(stagingPath))
         {
             throw new ThreatUpdateException("The staging path must not already exist.");
@@ -77,14 +117,22 @@ public sealed class SignedThreatBundleVerifier
                 throw new ThreatUpdateException("The update manifest signature is not valid.");
             }
 
-            var acceptance = _policy.Evaluate(
-                manifest,
-                highestAcceptedSequence,
-                _timeProvider.GetUtcNow());
-            if (!acceptance.IsAccepted)
+            if (highestAcceptedSequence.HasValue)
+            {
+                var acceptance = _policy.Evaluate(
+                    manifest,
+                    highestAcceptedSequence.Value,
+                    _timeProvider.GetUtcNow());
+                if (!acceptance.IsAccepted)
+                {
+                    throw new ThreatUpdateException(
+                        $"The update manifest was rejected: {acceptance.RejectionReason}.");
+                }
+            }
+            else if (manifest.Sequence != expectedSequence)
             {
                 throw new ThreatUpdateException(
-                    $"The update manifest was rejected: {acceptance.RejectionReason}.");
+                    "The installed update sequence does not match the content-store state.");
             }
 
             await File.WriteAllBytesAsync(
@@ -139,7 +187,9 @@ public sealed class SignedThreatBundleVerifier
         }
     }
 
-    private static void ValidateBundleDirectory(string bundlePath)
+    private static void ValidateBundleDirectory(
+        string bundlePath,
+        bool allowReputationDatabase)
     {
         var directory = new DirectoryInfo(bundlePath);
         directory.Refresh();
@@ -156,6 +206,14 @@ public sealed class SignedThreatBundleVerifier
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in directory.EnumerateFileSystemInfos())
         {
+            if (allowReputationDatabase &&
+                entry is FileInfo database &&
+                !database.Attributes.HasFlag(FileAttributes.ReparsePoint) &&
+                GeneratedDatabaseFileNames.Contains(database.Name))
+            {
+                continue;
+            }
+
             if (entry is not FileInfo ||
                 entry.Attributes.HasFlag(FileAttributes.ReparsePoint) ||
                 !RequiredFileNames.Contains(entry.Name) ||

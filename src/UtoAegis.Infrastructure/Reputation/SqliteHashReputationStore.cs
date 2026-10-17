@@ -9,11 +9,13 @@ public sealed class SqliteHashReputationStore : IHashReputationStore
     public const int CurrentSchemaVersion = 1;
 
     private readonly string _databasePath;
+    private readonly bool _pooling;
 
-    public SqliteHashReputationStore(string databasePath)
+    public SqliteHashReputationStore(string databasePath, bool pooling = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         _databasePath = Path.GetFullPath(databasePath);
+        _pooling = pooling;
     }
 
     public async ValueTask InitializeAsync(CancellationToken cancellationToken = default)
@@ -255,7 +257,7 @@ public sealed class SqliteHashReputationStore : IHashReputationStore
             Mode = mode,
             Cache = SqliteCacheMode.Default,
             ForeignKeys = true,
-            Pooling = true,
+            Pooling = _pooling,
             DefaultTimeout = 5
         }.ToString();
 
