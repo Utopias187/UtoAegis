@@ -14,6 +14,7 @@ using UtoAegis.Infrastructure.Monitoring;
 using UtoAegis.Infrastructure.Quarantine;
 using UtoAegis.Infrastructure.Reputation;
 using UtoAegis.Infrastructure.Signatures;
+using UtoAegis.Infrastructure.ThreatIntelligence;
 
 if (!CliOptions.TryParse(args, out var options, out var parseError))
 {
@@ -50,6 +51,9 @@ try
         CliCommand.QuarantineList => await QuarantineCommandRunner.ListAsync(options, cancellation.Token),
         CliCommand.QuarantineShow => await QuarantineCommandRunner.ShowAsync(options, cancellation.Token),
         CliCommand.QuarantineRestore => await QuarantineCommandRunner.RestoreAsync(options, cancellation.Token),
+        CliCommand.UpdateApply => await ThreatUpdateCommandRunner.ApplyAsync(options, cancellation.Token),
+        CliCommand.UpdateStatus => await ThreatUpdateCommandRunner.StatusAsync(options, cancellation.Token),
+        CliCommand.UpdateRollback => await ThreatUpdateCommandRunner.RollbackAsync(options, cancellation.Token),
         _ => ExitCodes.UsageError
     };
 }
@@ -84,6 +88,11 @@ catch (QuarantineStoreException exception)
 {
     Console.Error.WriteLine($"Quarantine vault error: {exception.Message}");
     return ExitCodeResolver.ForOperationFailure(options.Command);
+}
+catch (ThreatUpdateException exception)
+{
+    Console.Error.WriteLine($"Threat update rejected: {exception.Message}");
+    return ExitCodes.ThreatUpdateFailed;
 }
 catch (ArgumentException exception)
 {
@@ -856,6 +865,9 @@ static void PrintUsage()
           utoaegis history list --history <path> [--limit <1-200>] [--json]
           utoaegis history show --history <path> [--json] <scan-id>
           utoaegis history prune --history <path> --older-than-days <1-36500> [--json]
+          utoaegis updates apply --store <path> --trusted-key <key-id>=<public-key.pem> [--json] <bundle-directory>
+          utoaegis updates status --store <path> [--json]
+          utoaegis updates rollback --store <path> --trusted-key <key-id>=<public-key.pem> [--json]
 
         Commands:
           scan            Calculate SHA-256 and optionally run reputation and signature checks.
@@ -869,6 +881,9 @@ static void PrintUsage()
           history list    List recent stored scan summaries, newest first.
           history show    Show one complete stored scan record.
           history prune   Delete records older than the configured retention age.
+          updates apply   Verify, stage, and atomically activate a signed threat bundle.
+          updates status  Show active, rollback, and anti-rollback sequence state.
+          updates rollback  Reverify and restore the last known-good content version.
 
         Options:
           --recursive        Include nested directories; disabled by default.
@@ -882,6 +897,8 @@ static void PrintUsage()
           --destination      Optional nonexisting path for quarantine restore.
           --limit            Maximum history summaries to list; default 25, maximum 200.
           --older-than-days  Delete history older than this many days.
+          --store            Managed threat-content store directory.
+          --trusted-key      Trusted ECDSA P-256 key as <key-id>=<public-key.pem>; repeatable.
           --json             Emit the result as JSON.
           --quiet            Suppress structured operational logs on stderr.
           --                 Treat all following arguments as positional values.

@@ -18,5 +18,6 @@ internal static class ExitCodes
     public const int Quarantined = 14;
     public const int QuarantineFailed = 15;
     public const int RestoreFailed = 16;
+    public const int ThreatUpdateFailed = 17;
     public const int Cancelled = 130;
 }

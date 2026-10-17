@@ -14,12 +14,31 @@ public sealed class ThreatContentStore
     private readonly string _stagingPath;
     private readonly string _statePath;
     private readonly string _lockPath;
-    private readonly SignedThreatBundleVerifier _verifier;
+    private readonly SignedThreatBundleVerifier? _verifier;
+
+    public ThreatContentStore(string rootPath)
+        : this(rootPath, verifier: null, statusOnly: true)
+    {
+    }
 
     public ThreatContentStore(string rootPath, SignedThreatBundleVerifier verifier)
+        : this(
+            rootPath,
+            verifier ?? throw new ArgumentNullException(nameof(verifier)),
+            statusOnly: false)
+    {
+    }
+
+    private ThreatContentStore(
+        string rootPath,
+        SignedThreatBundleVerifier? verifier,
+        bool statusOnly)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
-        ArgumentNullException.ThrowIfNull(verifier);
+        if (!statusOnly)
+        {
+            ArgumentNullException.ThrowIfNull(verifier);
+        }
         _rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
         if (string.Equals(
                 _rootPath,
@@ -52,7 +71,7 @@ public sealed class ThreatContentStore
 
         try
         {
-            var verified = await _verifier.VerifyAndStageAsync(
+            var verified = await RequireVerifier().VerifyAndStageAsync(
                 bundleDirectory,
                 stagePath,
                 state?.HighestAcceptedSequence ?? 0,
@@ -189,7 +208,7 @@ public sealed class ThreatContentStore
         var verificationPath = CreateStagingPath();
         try
         {
-            var verified = await _verifier.VerifyInstalledAndStageAsync(
+            var verified = await RequireVerifier().VerifyInstalledAndStageAsync(
                 contentPath,
                 verificationPath,
                 reference.Sequence,
@@ -293,6 +312,10 @@ public sealed class ThreatContentStore
 
     private string GetVersionPath(ThreatContentReference reference) =>
         Path.Combine(_versionsPath, reference.DirectoryName);
+
+    private SignedThreatBundleVerifier RequireVerifier() =>
+        _verifier ?? throw new InvalidOperationException(
+            "This threat-content operation requires a configured signature verifier.");
 
     private static ThreatContentSnapshot CreateSnapshot(
         ThreatUpdateManifest manifest,

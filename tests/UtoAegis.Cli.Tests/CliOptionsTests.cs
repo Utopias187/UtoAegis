@@ -6,6 +6,54 @@ namespace UtoAegis.Cli.Tests;
 public sealed class CliOptionsTests
 {
     [TestMethod]
+    public void TryParse_UpdateApply_ReturnsStoreBundleAndKeys()
+    {
+        var parsed = CliOptions.TryParse(
+            [
+                "updates", "apply", "--store", "content", "--trusted-key",
+                "release-1=release-1.pem", "bundle"
+            ],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.IsNotNull(options);
+        Assert.AreEqual(CliCommand.UpdateApply, options.Command);
+        Assert.AreEqual("content", options.ContentStorePath);
+        Assert.AreEqual("bundle", options.InputPath);
+        Assert.HasCount(1, options.TrustedKeySpecs);
+        Assert.AreEqual("release-1=release-1.pem", options.TrustedKeySpecs[0]);
+    }
+
+    [TestMethod]
+    public void TryParse_UpdateStatus_DoesNotRequireKey()
+    {
+        var parsed = CliOptions.TryParse(
+            ["updates", "status", "--store", "content", "--json"],
+            out var options,
+            out var error);
+
+        Assert.IsTrue(parsed);
+        Assert.IsNull(error);
+        Assert.AreEqual(CliCommand.UpdateStatus, options!.Command);
+        Assert.IsTrue(options.Json);
+    }
+
+    [TestMethod]
+    public void TryParse_UpdateRollbackWithoutKey_IsRejected()
+    {
+        var parsed = CliOptions.TryParse(
+            ["updates", "rollback", "--store", "content"],
+            out var options,
+            out var error);
+
+        Assert.IsFalse(parsed);
+        Assert.IsNull(options);
+        StringAssert.Contains(error, "require at least one --trusted-key");
+    }
+
+    [TestMethod]
     public void TryParse_ScanWithSignatureFile_ReturnsExpectedOptions()
     {
         var parsed = CliOptions.TryParse(

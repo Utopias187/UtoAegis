@@ -63,6 +63,17 @@ public sealed class ThreatContentStoreTests
     }
 
     [TestMethod]
+    public async Task GetStatusAsync_EmptyStore_ReportsNoActiveContent()
+    {
+        var store = new ThreatContentStore(Path.Combine(_testDirectory, "empty-store"));
+
+        var status = await store.GetStatusAsync();
+
+        Assert.IsFalse(status.HasActiveContent);
+        Assert.AreEqual(0L, status.HighestAcceptedSequence);
+    }
+
+    [TestMethod]
     public async Task RollbackAsync_PreviousBundle_RestoresContentWithoutLoweringSequenceFloor()
     {
         var store = CreateStore();

@@ -15,7 +15,10 @@ internal enum CliCommand
     QuarantineAdd,
     QuarantineList,
     QuarantineShow,
-    QuarantineRestore
+    QuarantineRestore,
+    UpdateApply,
+    UpdateStatus,
+    UpdateRollback
 }
 
 internal sealed record CliOptions(
@@ -26,6 +29,8 @@ internal sealed record CliOptions(
     string? HistoryPath,
     string? VaultPath,
     string? DestinationPath,
+    string? ContentStorePath,
+    IReadOnlyList<string> TrustedKeySpecs,
     bool Recursive,
     int MaximumConcurrency,
     int DebounceMilliseconds,
@@ -123,6 +128,33 @@ internal sealed record CliOptions(
 
             index = 2;
         }
+        else if (args.Length > 0 && args[0] == "updates")
+        {
+            if (args.Length < 2)
+            {
+                return Fail(
+                    "updates requires a subcommand: apply, status, or rollback.",
+                    out options,
+                    out error);
+            }
+
+            command = args[1] switch
+            {
+                "apply" => CliCommand.UpdateApply,
+                "status" => CliCommand.UpdateStatus,
+                "rollback" => CliCommand.UpdateRollback,
+                _ => (CliCommand)(-1)
+            };
+            if ((int)command == -1)
+            {
+                return Fail(
+                    $"Unknown updates subcommand: {args[1]}",
+                    out options,
+                    out error);
+            }
+
+            index = 2;
+        }
 
         var json = false;
         var quiet = false;
@@ -144,6 +176,8 @@ internal sealed record CliOptions(
         string? historyPath = null;
         string? vaultPath = null;
         string? destinationPath = null;
+        string? contentStorePath = null;
+        var trustedKeySpecs = new List<string>();
         string? inputPath = null;
 
         while (index < args.Length)
@@ -220,6 +254,54 @@ internal sealed record CliOptions(
                 }
 
                 destinationPath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--store")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail("--store requires a path.", out options, out error);
+                }
+
+                if (contentStorePath is not null)
+                {
+                    return Fail("--store may only be supplied once.", out options, out error);
+                }
+
+                contentStorePath = args[index++];
+                continue;
+            }
+
+            if (parseOptions && argument == "--trusted-key")
+            {
+                if (index >= args.Length || string.IsNullOrWhiteSpace(args[index]))
+                {
+                    return Fail(
+                        "--trusted-key requires <key-id>=<public-key.pem>.",
+                        out options,
+                        out error);
+                }
+
+                var specification = args[index++];
+                var separator = specification.IndexOf('=', StringComparison.Ordinal);
+                if (separator <= 0 || separator == specification.Length - 1)
+                {
+                    return Fail(
+                        "--trusted-key requires <key-id>=<public-key.pem>.",
+                        out options,
+                        out error);
+                }
+
+                trustedKeySpecs.Add(specification);
+                if (trustedKeySpecs.Count > 32)
+                {
+                    return Fail(
+                        "At most 32 trusted signing keys may be supplied.",
+                        out options,
+                        out error);
+                }
+
                 continue;
             }
 
@@ -425,7 +507,8 @@ internal sealed record CliOptions(
             CliCommand.HistoryShow or
             CliCommand.QuarantineAdd or
             CliCommand.QuarantineShow or
-            CliCommand.QuarantineRestore;
+            CliCommand.QuarantineRestore or
+            CliCommand.UpdateApply;
         if (!showHelp && requiresInput && inputPath is null)
         {
             var inputName = command switch
@@ -436,6 +519,7 @@ internal sealed record CliOptions(
                 CliCommand.ImportHashes => "JSON Lines import file",
                 CliCommand.QuarantineAdd => "file",
                 CliCommand.QuarantineShow or CliCommand.QuarantineRestore => "quarantine ID",
+                CliCommand.UpdateApply => "signed bundle directory",
                 _ => "scan ID"
             };
             return Fail($"A {inputName} path is required.", out options, out error);
@@ -585,6 +669,47 @@ internal sealed record CliOptions(
                 .ToString("D", CultureInfo.InvariantCulture);
         }
 
+        if (!showHelp && IsUpdateCommand(command))
+        {
+            if (contentStorePath is null)
+            {
+                return Fail("Update commands require --store <path>.", out options, out error);
+            }
+
+            if (databasePath is not null || signaturePath is not null || historyPath is not null ||
+                vaultPath is not null || destinationPath is not null)
+            {
+                return Fail(
+                    "Scan, history, and quarantine paths are not valid with update commands.",
+                    out options,
+                    out error);
+            }
+
+            if (command is CliCommand.UpdateApply or CliCommand.UpdateRollback &&
+                trustedKeySpecs.Count == 0)
+            {
+                return Fail(
+                    "updates apply and rollback require at least one --trusted-key.",
+                    out options,
+                    out error);
+            }
+
+            if (command == CliCommand.UpdateStatus && trustedKeySpecs.Count != 0)
+            {
+                return Fail(
+                    "--trusted-key is not used with updates status.",
+                    out options,
+                    out error);
+            }
+        }
+        else if (!showHelp && (contentStorePath is not null || trustedKeySpecs.Count != 0))
+        {
+            return Fail(
+                "--store and --trusted-key are only valid with update commands.",
+                out options,
+                out error);
+        }
+
         if (!showHelp && command is CliCommand.QuarantineShow or CliCommand.QuarantineRestore &&
             !Guid.TryParseExact(inputPath, "D", out _))
         {
@@ -608,6 +733,8 @@ internal sealed record CliOptions(
             historyPath,
             vaultPath,
             destinationPath,
+            contentStorePath,
+            trustedKeySpecs,
             recursive,
             maximumConcurrency,
             debounceMilliseconds,
@@ -634,6 +761,11 @@ internal sealed record CliOptions(
         command is CliCommand.QuarantineList or
             CliCommand.QuarantineShow or
             CliCommand.QuarantineRestore;
+
+    private static bool IsUpdateCommand(CliCommand command) =>
+        command is CliCommand.UpdateApply or
+            CliCommand.UpdateStatus or
+            CliCommand.UpdateRollback;
 
     private static bool Fail(
         string message,

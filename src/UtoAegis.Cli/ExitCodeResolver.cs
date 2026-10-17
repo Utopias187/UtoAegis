@@ -57,6 +57,9 @@ internal static class ExitCodeResolver
             CliCommand.QuarantineList or
             CliCommand.QuarantineShow => ExitCodes.QuarantineFailed,
         CliCommand.QuarantineRestore => ExitCodes.RestoreFailed,
+        CliCommand.UpdateApply or
+            CliCommand.UpdateStatus or
+            CliCommand.UpdateRollback => ExitCodes.ThreatUpdateFailed,
         CliCommand.Scan => ExitCodes.ScanFailed,
         CliCommand.ImportHashes => ExitCodes.ImportFailed,
         _ => ExitCodes.HistoryStoreFailed

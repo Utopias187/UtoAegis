@@ -138,6 +138,18 @@ public sealed class SignedThreatBundleVerifierTests
         StringAssert.Contains(exception.Message, "private-key material");
     }
 
+    [TestMethod]
+    public async Task TrustStoreFileLoader_PublicKey_LoadsKeyById()
+    {
+        var path = Path.Combine(_testDirectory, "release-key.pem");
+        await File.WriteAllTextAsync(path, _signingKey.ExportSubjectPublicKeyInfoPem());
+
+        var store = await ThreatTrustStoreFileLoader.LoadAsync(
+            new Dictionary<string, string> { ["release-key-1"] = path });
+
+        CollectionAssert.Contains(store.KeyIds.ToArray(), "release-key-1");
+    }
+
     private SignedThreatBundleVerifier CreateVerifier()
     {
         var trustedKey = new TrustedThreatSigningKey(

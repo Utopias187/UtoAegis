@@ -92,6 +92,14 @@ public sealed class ExitCodeResolverTests
             ExitCodeResolver.ForOperationFailure(CliCommand.QuarantineRestore));
     }
 
+    [TestMethod]
+    public void ForOperationFailure_ThreatUpdate_ReturnsUpdateFailure()
+    {
+        Assert.AreEqual(
+            ExitCodes.ThreatUpdateFailed,
+            ExitCodeResolver.ForOperationFailure(CliCommand.UpdateApply));
+    }
+
     private static DirectoryScanResult FinishedDirectory(
         FileScanResult file,
         IReadOnlyList<DirectoryScanIssue> issues) =>
