@@ -245,6 +245,8 @@ public sealed class ThreatContentStore
             throw new ThreatUpdateException(
                 "The staged reputation database failed its validation lookup.");
         }
+
+        await database.PrepareForReadOnlyAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask WriteStateAsync(

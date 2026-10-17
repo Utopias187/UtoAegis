@@ -58,6 +58,8 @@ public sealed class ThreatContentStoreTests
         Assert.AreEqual(7L, status.HighestAcceptedSequence);
         Assert.IsNull(status.PreviousSequence);
         Assert.AreEqual(HashReputationStatus.Malicious, lookup.Status);
+        Assert.IsFalse(File.Exists(active.ReputationDatabasePath + "-wal"));
+        Assert.IsFalse(File.Exists(active.ReputationDatabasePath + "-shm"));
     }
 
     [TestMethod]

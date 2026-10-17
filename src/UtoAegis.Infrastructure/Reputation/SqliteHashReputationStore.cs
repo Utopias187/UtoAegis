@@ -153,6 +153,32 @@ public sealed class SqliteHashReputationStore : IHashReputationStore
         }
     }
 
+    public async ValueTask PrepareForReadOnlyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = CreateConnection(SqliteOpenMode.ReadWrite);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteNonQueryAsync(
+                    connection,
+                    "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;",
+                    transaction: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            throw new ReputationStoreException(
+                "The hash reputation database could not be prepared for read-only use.",
+                exception);
+        }
+    }
+
     public async ValueTask<HashImportResult> ImportAsync(
         IReadOnlyCollection<MalwareHashIndicator> indicators,
         CancellationToken cancellationToken = default)

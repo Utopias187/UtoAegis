@@ -133,6 +133,22 @@ public sealed class SqliteHashReputationStoreTests
     }
 
     [TestMethod]
+    public async Task PrepareForReadOnlyAsync_WalDatabase_CheckpointsSidecars()
+    {
+        var store = new SqliteHashReputationStore(_databasePath, pooling: false);
+        await store.InitializeAsync();
+        await store.ImportAsync([CreateIndicator('d')]);
+
+        await store.PrepareForReadOnlyAsync();
+
+        Assert.IsTrue(File.Exists(_databasePath));
+        Assert.IsFalse(File.Exists(_databasePath + "-wal"));
+        Assert.IsFalse(File.Exists(_databasePath + "-shm"));
+        var lookup = await store.LookupAsync(new string('d', 64));
+        Assert.AreEqual(HashReputationStatus.Malicious, lookup.Status);
+    }
+
+    [TestMethod]
     public async Task ImportAsync_SecondInsertFails_RollsBackFirstInsert()
     {
         var store = new SqliteHashReputationStore(_databasePath);
